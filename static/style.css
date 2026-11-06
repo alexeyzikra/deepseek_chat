@@ -457,3 +457,94 @@ button { cursor: pointer; font-family: var(--font); }
 
 .menu .danger { color: var(--danger); }
 .fork-note { font-size: 12px; color: var(--text-dim); }
+
+/* ----------------------------------------------------- окно статистики */
+
+.modal {
+  position: fixed;
+  inset: 0;
+  z-index: 20;
+  background: rgba(0, 0, 0, .55);
+  display: grid;
+  place-items: center;
+  padding: 24px;
+}
+.modal-card {
+  width: 100%;
+  max-width: 560px;
+  max-height: 85vh;
+  overflow-y: auto;
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 20px 24px 24px;
+}
+.modal-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 4px;
+}
+.modal-head span { font-size: 17px; }
+
+.stat-total {
+  font-size: 30px;
+  margin: 10px 0 2px;
+}
+.stat-sub { font-size: 13px; color: var(--text-dim); margin-bottom: 20px; }
+
+.stat-section {
+  font-size: 12px;
+  color: var(--text-dim);
+  margin: 22px 0 8px;
+  text-transform: uppercase;
+  letter-spacing: .04em;
+}
+
+table.stat {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 14px;
+}
+table.stat th {
+  text-align: left;
+  font-weight: normal;
+  color: var(--text-dim);
+  font-size: 12px;
+  padding: 0 0 6px;
+}
+table.stat td {
+  padding: 7px 0;
+  border-top: 1px solid var(--border);
+  vertical-align: baseline;
+}
+table.stat td.num { text-align: right; font-variant-numeric: tabular-nums; }
+table.stat tr.sub td { color: var(--text-dim); font-size: 13px; border-top: none; padding-top: 0; }
+
+.bar {
+  height: 4px;
+  border-radius: 2px;
+  background: var(--accent);
+  margin-top: 5px;
+  min-width: 2px;
+}
+
+.balance-line {
+  margin-top: 22px;
+  padding-top: 16px;
+  border-top: 1px solid var(--border);
+  font-size: 14px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.balance-line button {
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--text);
+  border-radius: 8px;
+  padding: 6px 12px;
+  font-size: 13px;
+}
+.balance-line button:hover { background: var(--bg-bubble); }

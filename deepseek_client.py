@@ -92,13 +92,17 @@ def _usage_dict(usage) -> dict:
 
 
 def balance() -> dict:
-    """Реальный остаток на счету — для сверки с нашим подсчётом."""
-    import httpx
+    """Реальный остаток на счету — для сверки с нашим подсчётом.
 
-    response = httpx.get(
+    Обычный GET на стандартной библиотеке: ради одного запроса не стоит
+    тащить зависимость, тем более что openai здесь работает на httpx2.
+    """
+    import json
+    import urllib.request
+
+    request = urllib.request.Request(
         f"{config.BASE_URL}/user/balance",
         headers={"Authorization": f"Bearer {config.API_KEY}"},
-        timeout=15,
     )
-    response.raise_for_status()
-    return response.json()
+    with urllib.request.urlopen(request, timeout=15) as response:
+        return json.loads(response.read())

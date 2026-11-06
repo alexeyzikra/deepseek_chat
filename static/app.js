@@ -303,6 +303,9 @@ function actionsRow(message, index, wrapper) {
     add("перегенерировать", () => regenerate(message, index));
   } else {
     add("форк", () => forkFrom(message, index));
+    if (message.cost_millicents) {
+      add("статистика", () => showStats(`/api/stats/message/${message.id}`));
+    }
   }
 
   // Удаляется это сообщение и весь хвост после него.
@@ -606,6 +609,183 @@ function scrollDown(force) {
   if (force || nearBottom) scroll.scrollTop = scroll.scrollHeight;
 }
 
+/* ---------------------------------------------------------- статистика */
+
+const CATEGORY = {
+  cache_hit: "Вход, попал в кэш",
+  cache_miss: "Вход, мимо кэша",
+  output: "Выход",
+};
+
+function closeModal() {
+  $("modal").classList.add("hidden");
+}
+
+async function showStats(url) {
+  try {
+    renderStats(await api(url), url.endsWith("/all"));
+  } catch (error) {
+    fail(error);
+  }
+}
+
+function sectionTitle(text) {
+  const div = document.createElement("div");
+  div.className = "stat-section";
+  div.textContent = text;
+  return div;
+}
+
+function cell(text, numeric) {
+  const td = document.createElement("td");
+  if (numeric) td.className = "num";
+  td.textContent = text;
+  return td;
+}
+
+function statTable(headers) {
+  const table = document.createElement("table");
+  table.className = "stat";
+  const tr = document.createElement("tr");
+  for (const [i, h] of headers.entries()) {
+    const th = document.createElement("th");
+    th.textContent = h;
+    if (i) th.style.textAlign = "right";
+    tr.appendChild(th);
+  }
+  table.appendChild(tr);
+  return table;
+}
+
+function renderStats(data, withBalance) {
+  $("modal-title").textContent = data.title;
+  const body = $("modal-body");
+  body.replaceChildren();
+
+  const total = document.createElement("div");
+  total.className = "stat-total";
+  total.textContent = formatCost(data.total);
+  body.appendChild(total);
+
+  const sub = document.createElement("div");
+  sub.className = "stat-sub";
+  const bits = [`вызовов к API: ${data.calls}`];
+  if (data.context_tokens) {
+    bits.push(`контекст ${data.context_tokens.toLocaleString("ru")} токенов`);
+  }
+  if (data.since) bits.push(`с ${data.since.slice(0, 10)}`);
+  sub.textContent = bits.join(" · ");
+  body.appendChild(sub);
+
+  if (!data.calls) {
+    body.appendChild(sectionTitle("Запросов к API здесь ещё не было"));
+    $("modal").classList.remove("hidden");
+    return;
+  }
+
+  // --- на что ушли деньги -------------------------------------------
+  body.appendChild(sectionTitle("На что ушли деньги"));
+  const table = statTable(["", "токенов", "цена", "доля"]);
+  for (const key of ["cache_hit", "cache_miss", "output"]) {
+    const cost = data.cost[key];
+    const share = data.total ? (cost / data.total) * 100 : 0;
+
+    const name = document.createElement("td");
+    name.appendChild(document.createTextNode(CATEGORY[key]));
+    const bar = document.createElement("div");
+    bar.className = "bar";
+    bar.style.width = Math.max(share, 0.5) + "%";
+    name.appendChild(bar);
+
+    const tr = document.createElement("tr");
+    tr.append(
+      name,
+      cell(data.tokens[key].toLocaleString("ru"), true),
+      cell(formatCost(cost), true),
+      cell(share.toFixed(0) + "%", true)
+    );
+    table.appendChild(tr);
+
+    if (key === "output" && data.tokens.reasoning) {
+      const note = document.createElement("tr");
+      note.className = "sub";
+      note.append(
+        cell("из них размышление"),
+        cell(data.tokens.reasoning.toLocaleString("ru"), true),
+        cell("", true),
+        cell("", true)
+      );
+      table.appendChild(note);
+    }
+  }
+  body.appendChild(table);
+
+  // --- тариф ----------------------------------------------------------
+  const peak = data.by_tariff.peak || 0;
+  const off = data.by_tariff.offpeak || 0;
+  if (peak || off) {
+    body.appendChild(sectionTitle("По тарифу"));
+    const t = statTable(["", "цена"]);
+    const rowFor = (label, value) => {
+      const tr = document.createElement("tr");
+      tr.append(cell(label), cell(formatCost(value), true));
+      return tr;
+    };
+    t.append(
+      rowFor("Непиковый — вполцены", off),
+      rowFor("Пиковый — 01–04 и 06–10 UTC, будни", peak)
+    );
+    body.appendChild(t);
+  }
+
+  // --- разбивка по строкам -------------------------------------------
+  if (data.rows && data.rows.length) {
+    body.appendChild(sectionTitle(data.rows_header));
+    const t = statTable(["", "вызовов", "цена"]);
+    for (const row of data.rows) {
+      const tr = document.createElement("tr");
+      tr.append(
+        cell(row.label),
+        cell(String(row.calls), true),
+        cell(formatCost(row.total), true)
+      );
+      t.appendChild(tr);
+    }
+    body.appendChild(t);
+  }
+
+  // --- сверка с настоящим балансом ------------------------------------
+  if (withBalance) {
+    const line = document.createElement("div");
+    line.className = "balance-line";
+    const text = document.createElement("span");
+    text.textContent = "Наш подсчёт можно сверить с настоящим счётом DeepSeek.";
+    const button = document.createElement("button");
+    button.textContent = "Узнать баланс";
+    button.onclick = async () => {
+      button.disabled = true;
+      button.textContent = "Спрашиваю…";
+      try {
+        const info = await api("/api/balance");
+        const first = (info.balance_infos || [])[0];
+        text.textContent = first
+          ? `На счету ${first.total_balance} ${first.currency}` +
+            (info.is_available ? "" : " — средств не хватает")
+          : "DeepSeek не вернул данных о балансе";
+        button.remove();
+      } catch (error) {
+        text.textContent = error.message;
+        button.disabled = false;
+        button.textContent = "Ещё раз";
+      }
+    };
+    line.append(text, button);
+    body.appendChild(line);
+  }
+
+  $("modal").classList.remove("hidden");
+}
+
 /* -------------------------------------------- форк и действия с чатом */
 
 async function forkFrom(message, index) {
@@ -649,6 +829,7 @@ function openChatMenu(chat, anchor) {
 
   item("Переименовать", () => startRename(chat));
   item(chat.pinned ? "Открепить" : "Закрепить", () => togglePin(chat));
+  item("Статистика", () => showStats(`/api/stats/chat/${chat.id}`));
 
   const separator = document.createElement("div");
   separator.className = "sep";
@@ -765,6 +946,26 @@ function openPersonaMenu() {
   separator.className = "sep";
   menu.appendChild(separator);
 
+  const personaStats = document.createElement("button");
+  personaStats.textContent = "Статистика личности";
+  personaStats.onclick = () => {
+    closeMenu();
+    showStats(`/api/stats/persona/${state.personaId}`);
+  };
+  menu.appendChild(personaStats);
+
+  const allStats = document.createElement("button");
+  allStats.textContent = "Статистика за всё время";
+  allStats.onclick = () => {
+    closeMenu();
+    showStats("/api/stats/all");
+  };
+  menu.appendChild(allStats);
+
+  const separator2 = document.createElement("div");
+  separator2.className = "sep";
+  menu.appendChild(separator2);
+
   const create = document.createElement("button");
   create.textContent = "Создать личность";
   create.onclick = () => {
@@ -836,6 +1037,17 @@ $("new-chat").onclick = async () => {
     fail(error);
   }
 };
+
+$("modal-close").onclick = closeModal;
+$("modal").onclick = (event) => {
+  if (event.target.id === "modal") closeModal();
+};
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape") {
+    closeModal();
+    closeMenu();
+  }
+});
 
 $("toggle-sidebar").onclick = () => $("app").classList.toggle("collapsed");
 $("persona-button").onclick = openPersonaMenu;

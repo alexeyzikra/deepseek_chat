@@ -562,6 +562,150 @@ def _sse(payload: dict) -> str:
     return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
 
 
+# ------------------------------------------------------------ статистика
+
+def _breakdown(rows) -> dict:
+    """Разбор журнала вызовов.
+
+    Цена по категориям пересчитывается из токенов по тарифу того вызова,
+    а не делится задним числом по текущему прайсу.
+    """
+    tokens = {"cache_hit": 0, "cache_miss": 0, "output": 0, "reasoning": 0}
+    cost = {"cache_hit": 0.0, "cache_miss": 0.0, "output": 0.0}
+    by_tariff = {"peak": 0.0, "offpeak": 0.0}
+    total = 0.0
+
+    for r in rows:
+        prices = config.PRICES.get(r["tariff"], config.PRICES["offpeak"])
+        tokens["cache_hit"] += r["cache_hit_tokens"]
+        tokens["cache_miss"] += r["cache_miss_tokens"]
+        tokens["output"] += r["output_tokens"]
+        tokens["reasoning"] += r["reasoning_tokens"]
+        cost["cache_hit"] += r["cache_hit_tokens"] * prices["cache_hit"] / 1e6
+        cost["cache_miss"] += r["cache_miss_tokens"] * prices["cache_miss"] / 1e6
+        cost["output"] += r["output_tokens"] * prices["output"] / 1e6
+        by_tariff[r["tariff"]] = by_tariff.get(r["tariff"], 0.0) + r["cost_usd"]
+        total += r["cost_usd"]
+
+    mc = pricing.to_millicents
+    return {
+        "calls": len(rows),
+        "tokens": tokens,
+        "cost": {k: mc(v) for k, v in cost.items()},
+        "by_tariff": {k: mc(v) for k, v in by_tariff.items()},
+        "total": mc(total),
+    }
+
+
+CALL_COLUMNS = (
+    "SELECT cache_hit_tokens, cache_miss_tokens, output_tokens, "
+    "reasoning_tokens, prompt_tokens, tariff, cost_usd, created_at FROM api_call"
+)
+
+
+@app.get("/api/stats/message/{message_id}")
+def stats_message(message_id: int):
+    with db.session() as conn:
+        rows = conn.execute(
+            CALL_COLUMNS + " WHERE message_id = ?", (message_id,)
+        ).fetchall()
+    if not rows:
+        raise HTTPException(404, "Это сообщение написано вручную — запроса к API не было")
+    data = _breakdown(rows)
+    data["title"] = "Этот ответ"
+    data["context_tokens"] = rows[-1]["prompt_tokens"]
+    data["at"] = rows[-1]["created_at"]
+    return data
+
+
+@app.get("/api/stats/chat/{chat_id}")
+def stats_chat(chat_id: int):
+    with db.session() as conn:
+        chat = conn.execute("SELECT * FROM chat WHERE id = ?", (chat_id,)).fetchone()
+        if not chat:
+            raise HTTPException(404, "Чат не найден")
+        rows = conn.execute(CALL_COLUMNS + " WHERE chat_id = ?", (chat_id,)).fetchall()
+        last = conn.execute(
+            "SELECT prompt_tokens FROM api_call WHERE chat_id = ? "
+            "ORDER BY id DESC LIMIT 1",
+            (chat_id,),
+        ).fetchone()
+    data = _breakdown(rows)
+    data["title"] = f"Чат {chat['title']}"
+    data["context_tokens"] = last["prompt_tokens"] if last else 0
+    data["context_limit"] = config.CONTEXT_LIMIT
+    return data
+
+
+@app.get("/api/stats/persona/{persona_id}")
+def stats_persona(persona_id: int):
+    with db.session() as conn:
+        persona = conn.execute(
+            "SELECT * FROM persona WHERE id = ?", (persona_id,)
+        ).fetchone()
+        if not persona:
+            raise HTTPException(404, "Личность не найдена")
+        rows = conn.execute(
+            CALL_COLUMNS + " WHERE persona_id = ?", (persona_id,)
+        ).fetchall()
+        per_chat = conn.execute(
+            "SELECT c.chat_id, COALESCE(ch.title, 'Удалённый чат') AS title, "
+            "COUNT(*) AS calls, SUM(c.cost_usd) AS cost "
+            "FROM api_call c LEFT JOIN chat ch ON ch.id = c.chat_id "
+            "WHERE c.persona_id = ? GROUP BY c.chat_id ORDER BY cost DESC",
+            (persona_id,),
+        ).fetchall()
+    data = _breakdown(rows)
+    data["title"] = f"Личность «{persona['name']}»"
+    data["rows"] = [
+        {
+            "label": r["title"],
+            "calls": r["calls"],
+            "total": pricing.to_millicents(r["cost"]),
+        }
+        for r in per_chat
+    ]
+    data["rows_header"] = "По чатам"
+    return data
+
+
+@app.get("/api/stats/all")
+def stats_all():
+    with db.session() as conn:
+        rows = conn.execute(CALL_COLUMNS).fetchall()
+        per_persona = conn.execute(
+            "SELECT c.persona_id, COALESCE(p.name, 'Удалённая личность') AS name, "
+            "COUNT(*) AS calls, SUM(c.cost_usd) AS cost "
+            "FROM api_call c LEFT JOIN persona p ON p.id = c.persona_id "
+            "GROUP BY c.persona_id ORDER BY cost DESC"
+        ).fetchall()
+        first = conn.execute(
+            "SELECT created_at FROM api_call ORDER BY id LIMIT 1"
+        ).fetchone()
+    data = _breakdown(rows)
+    data["title"] = "За всё время"
+    data["since"] = first["created_at"] if first else None
+    data["rows"] = [
+        {
+            "label": r["name"],
+            "calls": r["calls"],
+            "total": pricing.to_millicents(r["cost"]),
+        }
+        for r in per_persona
+    ]
+    data["rows_header"] = "По личностям"
+    return data
+
+
+@app.get("/api/balance")
+def balance():
+    """Настоящий остаток у DeepSeek — для сверки с нашим подсчётом."""
+    try:
+        return deepseek_client.balance()
+    except Exception as exc:
+        raise HTTPException(502, f"Не удалось спросить баланс: {exc}")
+
+
 # -------------------------------------------------------------------- статика
 
 app.mount("/static", StaticFiles(directory=config.BASE_DIR / "static"), name="static")
