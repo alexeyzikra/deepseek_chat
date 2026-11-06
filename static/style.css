@@ -109,6 +109,14 @@ input[type="text"]:focus, textarea:focus {
 
 button { cursor: pointer; font-family: var(--font); }
 
+.setup-buttons {
+  display: flex;
+  gap: 10px;
+  margin-top: 24px;
+}
+.setup-buttons .primary { margin-top: 0; }
+.setup-buttons .ghost-button { padding: 12px 22px; }
+
 .primary {
   margin-top: 24px;
   width: 100%;

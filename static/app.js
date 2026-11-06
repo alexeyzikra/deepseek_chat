@@ -42,13 +42,34 @@ async function boot() {
   state.personaId = data.current_persona_id;
 
   if (!state.personaId) {
-    $("setup").classList.remove("hidden");
-    $("setup-name").focus();
+    // Первый запуск: личностей нет, уходить отсюда некуда.
+    showSetup(false);
     return;
   }
   $("app").classList.remove("hidden");
   await loadPersona();
   await loadChats();
+}
+
+/** cancellable — есть ли куда вернуться, если передумал. */
+function showSetup(cancellable) {
+  $("setup-name").value = "";
+  $("setup-prompt").value = "";
+  $("setup-thinking").checked = false;
+  $("setup-error").classList.add("hidden");
+  $("setup-title").textContent = cancellable
+    ? "Новая личность"
+    : "Создай первую личность";
+  $("setup-cancel").classList.toggle("hidden", !cancellable);
+  $("app").classList.add("hidden");
+  $("setup").classList.remove("hidden");
+  $("setup-name").focus();
+}
+
+function hideSetup() {
+  if ($("setup-cancel").classList.contains("hidden")) return;
+  $("setup").classList.add("hidden");
+  $("app").classList.remove("hidden");
 }
 
 async function loadPersona() {
@@ -1334,12 +1355,7 @@ function openPersonaMenu() {
   create.textContent = "Создать личность";
   create.onclick = () => {
     closeMenu();
-    $("app").classList.add("hidden");
-    $("setup").classList.remove("hidden");
-    $("setup-name").value = "";
-    $("setup-prompt").value = "";
-    $("setup-thinking").checked = false;
-    $("setup-name").focus();
+    showSetup(true);
   };
   menu.appendChild(create);
 
@@ -1406,10 +1422,13 @@ $("modal-close").onclick = closeModal;
 $("modal").onclick = (event) => {
   if (event.target.id === "modal") closeModal();
 };
+$("setup-cancel").onclick = hideSetup;
+
 document.addEventListener("keydown", (event) => {
   if (event.key === "Escape") {
     closeModal();
     closeMenu();
+    hideSetup();
   }
 });
 

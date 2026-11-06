@@ -11,7 +11,7 @@
 <!-- Первый запуск: личностей ещё нет -->
 <section id="setup" class="setup hidden">
   <div class="setup-card">
-    <h1>Создай первую личность</h1>
+    <h1 id="setup-title">Создай первую личность</h1>
     <p class="muted">
       У личности своё имя, свой системный промпт и свои чаты.
       Чаты одной личности не видны из другой.
@@ -26,7 +26,10 @@
         <em>дороже и медленнее, температура в нём не действует</em>
       </span>
     </label>
-    <button id="setup-create" class="primary">Создать</button>
+    <div class="setup-buttons">
+      <button id="setup-create" class="primary">Создать</button>
+      <button id="setup-cancel" class="ghost-button hidden">Отмена</button>
+    </div>
     <div id="setup-error" class="error hidden"></div>
   </div>
 </section>
