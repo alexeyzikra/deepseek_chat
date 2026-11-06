@@ -220,19 +220,188 @@ function editSystemPrompt() {
 
 /* --------------------------------------------------------- сообщения */
 
-function renderBody(element, text) {
-  element.replaceChildren();
-  const parts = text.split("```");
-  parts.forEach((part, index) => {
-    if (index % 2 === 1) {
-      const pre = document.createElement("pre");
-      const newline = part.indexOf("\n");
-      pre.textContent = newline >= 0 ? part.slice(newline + 1) : part;
-      element.appendChild(pre);
-    } else if (part) {
-      element.appendChild(document.createTextNode(part));
+/* --- разметка -----------------------------------------------------------
+   Свой разбор, без библиотек. Текст модели попадает в страницу только
+   текстовыми узлами: никакого innerHTML, поэтому разметка в ответе не
+   может ничего выполнить на странице.
+------------------------------------------------------------------------ */
+
+function mdNode(name, text) {
+  const node = document.createElement(name);
+  node.textContent = text;
+  return node;
+}
+
+function mdLink(text, href) {
+  // Схемы кроме этих не открываем: ссылку предложила модель, не человек.
+  if (!/^(https?:|mailto:)/i.test(href)) {
+    return document.createTextNode(`${text} (${href})`);
+  }
+  const anchor = document.createElement("a");
+  anchor.href = href;
+  anchor.textContent = text;
+  anchor.target = "_blank";
+  anchor.rel = "noopener noreferrer";
+  return anchor;
+}
+
+// Подчёркивание намеренно НЕ считается выделением: в разговоре о коде
+// snake_case и __init__ встречаются чаще, чем курсив через _.
+const INLINE_RE =
+  /`([^`\n]+)`|\*\*([^*\n]+)\*\*|\*([^*\n]+)\*|~~([^~\n]+)~~|\[([^\]\n]+)\]\(([^)\s]+)\)/g;
+
+function appendInline(parent, text) {
+  let last = 0;
+  let match;
+  INLINE_RE.lastIndex = 0;
+  while ((match = INLINE_RE.exec(text))) {
+    if (match.index > last) {
+      parent.appendChild(document.createTextNode(text.slice(last, match.index)));
     }
-  });
+    if (match[1] !== undefined) parent.appendChild(mdNode("code", match[1]));
+    else if (match[2] !== undefined) parent.appendChild(mdNode("strong", match[2]));
+    else if (match[3] !== undefined) parent.appendChild(mdNode("em", match[3]));
+    else if (match[4] !== undefined) parent.appendChild(mdNode("del", match[4]));
+    else parent.appendChild(mdLink(match[5], match[6]));
+    last = match.index + match[0].length;
+  }
+  if (last < text.length) {
+    parent.appendChild(document.createTextNode(text.slice(last)));
+  }
+}
+
+function codeBlock(code, language) {
+  const wrap = document.createElement("div");
+  wrap.className = "code-block";
+
+  const head = document.createElement("div");
+  head.className = "code-head";
+  const label = document.createElement("span");
+  label.textContent = language || "код";
+  const copy = document.createElement("button");
+  copy.textContent = "копировать";
+  copy.onclick = async () => {
+    try {
+      await navigator.clipboard.writeText(code);
+      copy.textContent = "скопировано";
+      setTimeout(() => (copy.textContent = "копировать"), 1200);
+    } catch (_) {}
+  };
+  head.append(label, copy);
+
+  const pre = document.createElement("pre");
+  pre.textContent = code;
+  wrap.append(head, pre);
+  return wrap;
+}
+
+const BULLET_RE = /^(\s*)([-*+])\s+(.*)$/;
+const NUMBER_RE = /^(\s*)(\d+)[.)]\s+(.*)$/;
+
+function parseMarkdown(text) {
+  const lines = text.split("\n");
+  const blocks = [];
+  let paragraph = [];
+  let i = 0;
+
+  const flush = () => {
+    if (!paragraph.length) return;
+    const p = document.createElement("p");
+    appendInline(p, paragraph.join("\n"));
+    blocks.push(p);
+    paragraph = [];
+  };
+
+  while (i < lines.length) {
+    const line = lines[i];
+
+    // Блок кода. Незакрытый тоже показываем блоком — так он выглядит
+    // правильно уже во время стриминга, пока ответ ещё пишется.
+    const fence = line.match(/^\s*```(.*)$/);
+    if (fence) {
+      flush();
+      const body = [];
+      i += 1;
+      while (i < lines.length && !/^\s*```\s*$/.test(lines[i])) {
+        body.push(lines[i]);
+        i += 1;
+      }
+      i += 1;
+      blocks.push(codeBlock(body.join("\n"), fence[1].trim()));
+      continue;
+    }
+
+    const heading = line.match(/^(#{1,6})\s+(.*)$/);
+    if (heading) {
+      flush();
+      const node = document.createElement("h" + heading[1].length);
+      appendInline(node, heading[2].trim());
+      blocks.push(node);
+      i += 1;
+      continue;
+    }
+
+    if (/^\s*(-{3,}|\*{3,}|_{3,})\s*$/.test(line)) {
+      flush();
+      blocks.push(document.createElement("hr"));
+      i += 1;
+      continue;
+    }
+
+    if (/^\s*>\s?/.test(line)) {
+      flush();
+      const quoted = [];
+      while (i < lines.length && /^\s*>\s?/.test(lines[i])) {
+        quoted.push(lines[i].replace(/^\s*>\s?/, ""));
+        i += 1;
+      }
+      const quote = document.createElement("blockquote");
+      for (const node of parseMarkdown(quoted.join("\n"))) quote.appendChild(node);
+      blocks.push(quote);
+      continue;
+    }
+
+    if (BULLET_RE.test(line) || NUMBER_RE.test(line)) {
+      flush();
+      const ordered = !BULLET_RE.test(line);
+      const list = document.createElement(ordered ? "ol" : "ul");
+      while (i < lines.length) {
+        const match = lines[i].match(ordered ? NUMBER_RE : BULLET_RE);
+        if (!match) break;
+        const item = document.createElement("li");
+        appendInline(item, match[3]);
+        list.appendChild(item);
+        i += 1;
+      }
+      blocks.push(list);
+      continue;
+    }
+
+    if (!line.trim()) {
+      flush();
+      i += 1;
+      continue;
+    }
+
+    paragraph.push(line);
+    i += 1;
+  }
+
+  flush();
+  return blocks;
+}
+
+function renderBody(element, text, plain) {
+  element.replaceChildren();
+  if (plain) {
+    // Своё сообщение показываем ровно как набрано: в этом инструменте
+    // важно видеть, что именно лежит в истории.
+    element.classList.remove("md");
+    element.textContent = text;
+    return;
+  }
+  element.classList.add("md");
+  for (const node of parseMarkdown(text)) element.appendChild(node);
 }
 
 function reasoningElement(text) {
@@ -266,7 +435,7 @@ function messageElement(message, index) {
 
   const body = document.createElement("div");
   body.className = "body";
-  renderBody(body, message.content);
+  renderBody(body, message.content, message.role === "user");
   wrapper.appendChild(body);
 
   if (message.cost_millicents) {
@@ -420,6 +589,9 @@ async function streamInto(url, payload, wrapper) {
   const body = wrapper.querySelector(".body");
   let contentText = "";
   let reasoningText = "";
+  // Разбор разметки на каждый чанк — лишняя работа: за ответ их сотни.
+  // Перерисовываем не чаще, чем раз в 120 мс, и обязательно в конце.
+  let lastDraw = 0;
 
   const response = await fetch(url, {
     method: "POST",
@@ -456,11 +628,17 @@ async function streamInto(url, payload, wrapper) {
         scrollDown(false);
       } else if (event.type === "content") {
         contentText += event.text;
-        renderBody(body, contentText);
-        scrollDown(false);
+        const now = Date.now();
+        if (now - lastDraw > 120) {
+          lastDraw = now;
+          renderBody(body, contentText);
+          scrollDown(false);
+        }
       } else if (event.type === "error") {
         throw new Error(event.message);
       } else if (event.type === "done") {
+        renderBody(body, contentText);
+        scrollDown(false);
         return event;
       }
     }
