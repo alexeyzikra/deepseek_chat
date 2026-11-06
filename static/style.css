@@ -9,9 +9,26 @@
   --accent: #4d6bfe;
   --accent-text: #ffffff;
   --danger: #e5534b;
+  --overlay: rgba(0, 0, 0, .55);
+  --shadow: 0 10px 30px rgba(0, 0, 0, .45);
   --radius: 14px;
   --font: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
   --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+:root[data-theme="light"] {
+  --bg: #ffffff;
+  --bg-sidebar: #f6f7f8;
+  --bg-raised: #f1f2f4;
+  --bg-bubble: #e8eaee;
+  --border: #e0e2e6;
+  --text: #1c1d20;
+  --text-dim: #6a6e75;
+  --accent: #4d6bfe;
+  --accent-text: #ffffff;
+  --danger: #c7372f;
+  --overlay: rgba(20, 20, 25, .3);
+  --shadow: 0 10px 30px rgba(20, 25, 40, .14);
 }
 
 * { box-sizing: border-box; }
@@ -336,7 +353,7 @@ button { cursor: pointer; font-family: var(--font); }
   border: 1px solid var(--border);
   border-radius: 12px;
   padding: 6px;
-  box-shadow: 0 10px 30px rgba(0,0,0,.45);
+  box-shadow: var(--shadow);
 }
 .menu button {
   display: block;
@@ -464,7 +481,7 @@ button { cursor: pointer; font-family: var(--font); }
   position: fixed;
   inset: 0;
   z-index: 20;
-  background: rgba(0, 0, 0, .55);
+  background: var(--overlay);
   display: grid;
   place-items: center;
   padding: 24px;
@@ -548,3 +565,64 @@ table.stat tr.sub td { color: var(--text-dim); font-size: 13px; border-top: none
   font-size: 13px;
 }
 .balance-line button:hover { background: var(--bg-bubble); }
+
+/* ------------------------------------------------------------ настройки */
+
+.setting {
+  margin-bottom: 22px;
+}
+.setting label {
+  display: block;
+  font-size: 13px;
+  color: var(--text-dim);
+  margin-bottom: 6px;
+}
+.note {
+  font-size: 12px;
+  color: var(--text-dim);
+  margin-top: 6px;
+  line-height: 1.5;
+}
+.setting textarea { min-height: 150px; }
+
+.setting label.switch, .switch {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  font-size: 14px;
+  color: var(--text);
+  cursor: pointer;
+}
+.switch input { margin-top: 4px; }
+
+.theme-choice { display: flex; gap: 8px; }
+.theme-choice button {
+  flex: 1;
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--text);
+  border-radius: 10px;
+  padding: 9px;
+  font-size: 14px;
+}
+.theme-choice button.current {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.danger-zone {
+  margin-top: 26px;
+  padding-top: 18px;
+  border-top: 1px solid var(--border);
+}
+.danger-zone button {
+  border: 1px solid var(--danger);
+  background: none;
+  color: var(--danger);
+  border-radius: 10px;
+  padding: 9px 16px;
+  font-size: 14px;
+}
+.danger-zone button:hover { background: var(--danger); color: #fff; }
+
+.saved-note { color: var(--accent); font-size: 13px; margin-left: 12px; }

@@ -31,6 +31,16 @@ class CurrentPersonaIn(BaseModel):
     persona_id: int
 
 
+class PersonaPatchIn(BaseModel):
+    name: str | None = None
+    system_prompt: str | None = None
+    thinking_enabled: bool | None = None
+
+
+class SettingsIn(BaseModel):
+    theme: str | None = None
+
+
 class SendIn(BaseModel):
     content: str
 
@@ -65,7 +75,12 @@ def bootstrap():
         if current_id is None and personas:
             current_id = personas[0]["id"]
             db.set_state(conn, CURRENT_PERSONA, str(current_id))
-    return {"personas": personas, "current_persona_id": current_id}
+        theme = db.get_state(conn, "theme") or "dark"
+    return {
+        "personas": personas,
+        "current_persona_id": current_id,
+        "theme": theme,
+    }
 
 
 @app.post("/api/personas")
@@ -108,6 +123,99 @@ def get_persona(persona_id: int):
     if not row:
         raise HTTPException(404, "Личность не найдена")
     return dict(row)
+
+
+@app.patch("/api/personas/{persona_id}")
+def patch_persona(persona_id: int, body: PersonaPatchIn):
+    """Имя, промпт и режим размышления личности.
+
+    Промпт личности — образец для НОВЫХ чатов. Уже существующие чаты держат
+    собственную копию и здесь не меняются.
+    """
+    with db.session() as conn:
+        row = conn.execute(
+            "SELECT id FROM persona WHERE id = ? AND deleted_at IS NULL",
+            (persona_id,),
+        ).fetchone()
+        if not row:
+            raise HTTPException(404, "Личность не найдена")
+        if body.name is not None:
+            name = body.name.strip()
+            if not name:
+                raise HTTPException(400, "У личности должно быть имя")
+            conn.execute("UPDATE persona SET name = ? WHERE id = ?", (name, persona_id))
+        if body.system_prompt is not None:
+            conn.execute(
+                "UPDATE persona SET system_prompt = ? WHERE id = ?",
+                (body.system_prompt, persona_id),
+            )
+        if body.thinking_enabled is not None:
+            conn.execute(
+                "UPDATE persona SET thinking_enabled = ? WHERE id = ?",
+                (int(body.thinking_enabled), persona_id),
+            )
+    return {"ok": True}
+
+
+@app.delete("/api/personas/{persona_id}")
+def delete_persona(persona_id: int):
+    """Безвозвратно: имя, промпт и все чаты личности стираются.
+
+    В статистике остаётся обезличенная строка «Удалённая личность №N» —
+    только цифры, чтобы расходы не выпали из общей суммы.
+    """
+    next_id = None
+    with db.session() as conn:
+        persona = conn.execute(
+            "SELECT * FROM persona WHERE id = ? AND deleted_at IS NULL",
+            (persona_id,),
+        ).fetchone()
+        if not persona:
+            raise HTTPException(404, "Личность не найдена")
+
+        for chat in conn.execute(
+            "SELECT id FROM chat WHERE persona_id = ?", (persona_id,)
+        ).fetchall():
+            conn.execute("DELETE FROM message WHERE chat_id = ?", (chat["id"],))
+        conn.execute("DELETE FROM chat WHERE persona_id = ?", (persona_id,))
+
+        counter = int(db.get_state(conn, "deleted_personas") or 0) + 1
+        db.set_state(conn, "deleted_personas", str(counter))
+        conn.execute(
+            "UPDATE persona SET deleted_at = ?, name = ?, system_prompt = '' "
+            "WHERE id = ?",
+            (db.now(), f"Удалённая личность №{counter}", persona_id),
+        )
+
+        other = conn.execute(
+            "SELECT id FROM persona WHERE deleted_at IS NULL ORDER BY id LIMIT 1"
+        ).fetchone()
+        if other:
+            next_id = other["id"]
+            db.set_state(conn, CURRENT_PERSONA, str(next_id))
+        else:
+            conn.execute("DELETE FROM app_state WHERE key = ?", (CURRENT_PERSONA,))
+
+    db.vacuum()
+    return {"ok": True, "next_persona_id": next_id}
+
+
+# ------------------------------------------------------------- настройки
+
+@app.get("/api/settings")
+def get_settings():
+    with db.session() as conn:
+        return {"theme": db.get_state(conn, "theme") or "dark"}
+
+
+@app.patch("/api/settings")
+def patch_settings(body: SettingsIn):
+    if body.theme is not None:
+        if body.theme not in ("dark", "light"):
+            raise HTTPException(400, "Тема бывает только dark или light")
+        with db.session() as conn:
+            db.set_state(conn, "theme", body.theme)
+    return {"ok": True}
 
 
 # ---------------------------------------------------------------------- чаты

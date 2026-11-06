@@ -9,6 +9,7 @@ const state = {
   chat: null,
   messages: [],
   busy: false,
+  theme: "dark",
 };
 
 const $ = (id) => document.getElementById(id);
@@ -36,6 +37,7 @@ function fail(error) {
 
 async function boot() {
   const data = await api("/api/bootstrap");
+  applyTheme(data.theme);
   state.personas = data.personas;
   state.personaId = data.current_persona_id;
 
@@ -609,6 +611,182 @@ function scrollDown(force) {
   if (force || nearBottom) scroll.scrollTop = scroll.scrollHeight;
 }
 
+/* ----------------------------------------------------------- настройки */
+
+function applyTheme(theme) {
+  state.theme = theme === "light" ? "light" : "dark";
+  document.documentElement.dataset.theme = state.theme;
+}
+
+function settingBlock(labelText) {
+  const box = document.createElement("div");
+  box.className = "setting";
+  if (labelText) {
+    const label = document.createElement("label");
+    label.textContent = labelText;
+    box.appendChild(label);
+  }
+  return box;
+}
+
+function note(text) {
+  const div = document.createElement("div");
+  div.className = "note";
+  div.textContent = text;
+  return div;
+}
+
+function openSettings() {
+  const persona = state.persona;
+  $("modal-title").textContent = "Настройки";
+  const body = $("modal-body");
+  body.replaceChildren();
+
+  // --- имя -------------------------------------------------------------
+  const nameBox = settingBlock("Имя личности");
+  const nameInput = document.createElement("input");
+  nameInput.type = "text";
+  nameInput.value = persona.name;
+  nameBox.appendChild(nameInput);
+  body.appendChild(nameBox);
+
+  // --- системный промпт -------------------------------------------------
+  const promptBox = settingBlock("Системный промпт личности");
+  const promptArea = document.createElement("textarea");
+  promptArea.value = persona.system_prompt || "";
+  promptBox.append(
+    promptArea,
+    note(
+      "Это образец для новых чатов. Уже созданные чаты держат собственную " +
+        "копию промпта и отсюда не меняются — промпт отдельного чата " +
+        "правится прямо в нём, блоком сверху."
+    )
+  );
+  body.appendChild(promptBox);
+
+  // --- размышление -------------------------------------------------------
+  const thinkBox = settingBlock("");
+  const switchLabel = document.createElement("label");
+  switchLabel.className = "switch";
+  const checkbox = document.createElement("input");
+  checkbox.type = "checkbox";
+  checkbox.checked = Boolean(persona.thinking_enabled);
+  const switchText = document.createElement("span");
+  switchText.textContent = "Режим размышления";
+  switchLabel.append(checkbox, switchText);
+  thinkBox.append(
+    switchLabel,
+    note(
+      "Дороже и медленнее: размышления тарифицируются как выходные токены. " +
+        "Температура в этом режиме не действует вовсе."
+    )
+  );
+  body.appendChild(thinkBox);
+
+  // --- сохранить ---------------------------------------------------------
+  const saveRow = document.createElement("div");
+  const save = document.createElement("button");
+  save.className = "primary";
+  save.style.marginTop = "0";
+  save.style.width = "auto";
+  save.style.padding = "9px 20px";
+  save.textContent = "Сохранить";
+  const saved = document.createElement("span");
+  saved.className = "saved-note";
+  save.onclick = async () => {
+    save.disabled = true;
+    saved.textContent = "";
+    try {
+      await api(`/api/personas/${persona.id}`, {
+        method: "PATCH",
+        body: JSON.stringify({
+          name: nameInput.value,
+          system_prompt: promptArea.value,
+          thinking_enabled: checkbox.checked,
+        }),
+      });
+      const fresh = await api("/api/bootstrap");
+      state.personas = fresh.personas;
+      await loadPersona();
+      saved.textContent = "сохранено";
+    } catch (error) {
+      fail(error);
+    }
+    save.disabled = false;
+  };
+  saveRow.append(save, saved);
+  body.appendChild(saveRow);
+
+  // --- тема --------------------------------------------------------------
+  const themeBox = settingBlock("Тема");
+  themeBox.style.marginTop = "26px";
+  const choice = document.createElement("div");
+  choice.className = "theme-choice";
+  for (const [value, label] of [["dark", "Тёмная"], ["light", "Светлая"]]) {
+    const button = document.createElement("button");
+    button.textContent = label;
+    if (state.theme === value) button.classList.add("current");
+    button.onclick = async () => {
+      applyTheme(value);
+      for (const other of choice.children) other.classList.remove("current");
+      button.classList.add("current");
+      try {
+        await api("/api/settings", {
+          method: "PATCH",
+          body: JSON.stringify({ theme: value }),
+        });
+      } catch (error) {
+        fail(error);
+      }
+    };
+    choice.appendChild(button);
+  }
+  themeBox.appendChild(choice);
+  body.appendChild(themeBox);
+
+  // --- удаление личности --------------------------------------------------
+  const zone = document.createElement("div");
+  zone.className = "danger-zone";
+  const remove = document.createElement("button");
+  remove.textContent = "Удалить личность";
+  remove.onclick = () => removePersona(persona);
+  zone.append(
+    remove,
+    note(
+      "Сотрёт имя, промпт и все чаты этой личности без возможности " +
+        "восстановления. В статистике останется строка без названия, " +
+        "чтобы расходы не выпали из общей суммы."
+    )
+  );
+  body.appendChild(zone);
+
+  $("modal").classList.remove("hidden");
+}
+
+async function removePersona(persona) {
+  const question =
+    `Удалить личность «${persona.name}»?\n\n` +
+    "Вместе с ней стираются все её чаты и системный промпт.\n" +
+    "Восстановить будет нельзя.";
+  if (!confirm(question)) return;
+  try {
+    const result = await api(`/api/personas/${persona.id}`, { method: "DELETE" });
+    closeModal();
+    if (result.next_persona_id) {
+      const fresh = await api("/api/bootstrap");
+      state.personas = fresh.personas;
+      state.personaId = result.next_persona_id;
+      state.chatId = null;
+      await loadPersona();
+      await loadChats();
+    } else {
+      location.reload();
+    }
+  } catch (error) {
+    fail(error);
+  }
+}
+
 /* ---------------------------------------------------------- статистика */
 
 const CATEGORY = {
@@ -945,6 +1123,14 @@ function openPersonaMenu() {
   const separator = document.createElement("div");
   separator.className = "sep";
   menu.appendChild(separator);
+
+  const settings = document.createElement("button");
+  settings.textContent = "Настройки";
+  settings.onclick = () => {
+    closeMenu();
+    openSettings();
+  };
+  menu.appendChild(settings);
 
   const personaStats = document.createElement("button");
   personaStats.textContent = "Статистика личности";
