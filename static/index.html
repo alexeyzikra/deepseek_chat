@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>DeepSeek Chat</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+
+<!-- Первый запуск: личностей ещё нет -->
+<section id="setup" class="setup hidden">
+  <div class="setup-card">
+    <h1>Создай первую личность</h1>
+    <p class="muted">
+      У личности своё имя, свой системный промпт и свои чаты.
+      Чаты одной личности не видны из другой.
+    </p>
+    <label>Имя</label>
+    <input id="setup-name" type="text" placeholder="Например: Программист" autocomplete="off">
+    <label>Системный промпт</label>
+    <textarea id="setup-prompt" rows="9" placeholder="Можно оставить пустым и заполнить позже"></textarea>
+    <label class="checkbox">
+      <input id="setup-thinking" type="checkbox">
+      <span>Режим размышления
+        <em>дороже и медленнее, температура в нём не действует</em>
+      </span>
+    </label>
+    <button id="setup-create" class="primary">Создать</button>
+    <div id="setup-error" class="error hidden"></div>
+  </div>
+</section>
+
+<!-- Основной интерфейс -->
+<div id="app" class="app hidden">
+
+  <aside id="sidebar" class="sidebar">
+    <div class="sidebar-top">
+      <button id="new-chat" class="new-chat">Новый чат</button>
+    </div>
+    <nav id="chat-list" class="chat-list"></nav>
+    <div class="sidebar-bottom">
+      <button id="persona-button" class="persona-button">
+        <span id="persona-avatar" class="avatar"></span>
+        <span id="persona-name" class="persona-name"></span>
+      </button>
+    </div>
+  </aside>
+
+  <main class="main">
+    <header class="topbar">
+      <button id="toggle-sidebar" class="icon-button" title="Свернуть меню">☰</button>
+      <span id="chat-title" class="chat-title"></span>
+      <span id="chat-meta" class="chat-meta"></span>
+    </header>
+
+    <div id="scroll" class="scroll">
+      <details id="system-block" class="system-block hidden">
+        <summary>Системный промпт</summary>
+        <pre id="system-text"></pre>
+      </details>
+      <div id="messages" class="messages"></div>
+    </div>
+
+    <div class="composer">
+      <textarea id="input" rows="1" placeholder="Сообщение…"></textarea>
+      <button id="send" class="send" title="Отправить">↑</button>
+    </div>
+  </main>
+</div>
+
+<div id="persona-menu" class="menu hidden"></div>
+<div id="overlay" class="overlay hidden"></div>
+
+<script src="/static/app.js"></script>
+</body>
+</html>
