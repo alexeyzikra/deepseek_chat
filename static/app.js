@@ -91,11 +91,32 @@ function renderChats() {
   const rest = state.chats.filter((c) => !c.pinned);
 
   const addItem = (chat) => {
+    const row = document.createElement("div");
+    row.className = "chat-row" + (chat.id === state.chatId ? " active" : "");
+    row.dataset.id = chat.id;
+
     const button = document.createElement("button");
-    button.className = "chat-item" + (chat.id === state.chatId ? " active" : "");
-    button.textContent = chat.title;
+    button.className = "chat-item";
+    if (chat.pinned) {
+      const pin = document.createElement("span");
+      pin.className = "pin";
+      pin.textContent = "📌";
+      button.appendChild(pin);
+    }
+    button.appendChild(document.createTextNode(chat.title));
     button.onclick = () => openChat(chat.id).catch(fail);
-    list.appendChild(button);
+
+    const more = document.createElement("button");
+    more.className = "chat-more";
+    more.textContent = "⋯";
+    more.title = "Действия с чатом";
+    more.onclick = (event) => {
+      event.stopPropagation();
+      openChatMenu(chat, more);
+    };
+
+    row.append(button, more);
+    list.appendChild(row);
   };
 
   if (pinned.length) {
@@ -127,6 +148,13 @@ async function openChat(id, keepScroll = false) {
   renderChats();
 
   $("chat-title").textContent = data.chat.title;
+  if (data.chat.forked_from_chat_id) {
+    const source = state.chats.find((c) => c.id === data.chat.forked_from_chat_id);
+    const note = document.createElement("span");
+    note.className = "fork-note";
+    note.textContent = source ? ` · форк из ${source.title}` : " · форк";
+    $("chat-title").appendChild(note);
+  }
   updateMeta(data.spent_millicents, data.context_tokens, data.context_limit);
   renderSystemPrompt();
   renderMessages();
@@ -273,6 +301,8 @@ function actionsRow(message, index, wrapper) {
 
   if (message.role === "user") {
     add("перегенерировать", () => regenerate(message, index));
+  } else {
+    add("форк", () => forkFrom(message, index));
   }
 
   // Удаляется это сообщение и весь хвост после него.
@@ -576,6 +606,131 @@ function scrollDown(force) {
   if (force || nearBottom) scroll.scrollTop = scroll.scrollHeight;
 }
 
+/* -------------------------------------------- форк и действия с чатом */
+
+async function forkFrom(message, index) {
+  const kept = index + 1;
+  const tail = state.messages.length - kept;
+  const question =
+    tail > 0
+      ? `Сделать копию чата с первыми ${kept} сообщениями?\n\nПоследние ${tail} в копию не войдут. Этот чат останется как есть.`
+      : "Сделать полную копию этого чата?";
+  if (!confirm(question)) return;
+  try {
+    const created = await api(`/api/messages/${message.id}/fork`, { method: "POST" });
+    state.chatId = created.id;
+    await loadChats();
+  } catch (error) {
+    fail(error);
+  }
+}
+
+async function refreshChatList() {
+  state.chats = await api(`/api/personas/${state.personaId}/chats`);
+  renderChats();
+  const current = state.chats.find((c) => c.id === state.chatId);
+  if (current) $("chat-title").textContent = current.title;
+}
+
+function openChatMenu(chat, anchor) {
+  const menu = $("persona-menu");
+  menu.replaceChildren();
+
+  const item = (label, handler, danger) => {
+    const button = document.createElement("button");
+    if (danger) button.className = "danger";
+    button.textContent = label;
+    button.onclick = () => {
+      closeMenu();
+      handler();
+    };
+    menu.appendChild(button);
+  };
+
+  item("Переименовать", () => startRename(chat));
+  item(chat.pinned ? "Открепить" : "Закрепить", () => togglePin(chat));
+
+  const separator = document.createElement("div");
+  separator.className = "sep";
+  menu.appendChild(separator);
+  item("Удалить", () => removeChat(chat), true);
+
+  const box = anchor.getBoundingClientRect();
+  menu.classList.remove("hidden");
+  menu.style.bottom = "";
+  menu.style.left = box.left + "px";
+  menu.style.top = box.bottom + 6 + "px";
+  $("overlay").classList.remove("hidden");
+}
+
+function startRename(chat) {
+  const row = $("chat-list").querySelector(`.chat-row[data-id="${chat.id}"]`);
+  if (!row) return;
+
+  const input = document.createElement("input");
+  input.className = "rename-input";
+  input.value = chat.title;
+  row.replaceChildren(input);
+  input.focus();
+  input.select();
+
+  let settled = false;
+  const finish = async (save) => {
+    if (settled) return;
+    settled = true;
+    const title = input.value.trim();
+    if (!save || !title || title === chat.title) return renderChats();
+    try {
+      await api(`/api/chats/${chat.id}`, {
+        method: "PATCH",
+        body: JSON.stringify({ title }),
+      });
+      await refreshChatList();
+    } catch (error) {
+      fail(error);
+      renderChats();
+    }
+  };
+
+  input.onkeydown = (event) => {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      finish(true);
+    } else if (event.key === "Escape") {
+      event.preventDefault();
+      finish(false);
+    }
+  };
+  input.onblur = () => finish(true);
+}
+
+async function togglePin(chat) {
+  try {
+    await api(`/api/chats/${chat.id}`, {
+      method: "PATCH",
+      body: JSON.stringify({ pinned: !chat.pinned }),
+    });
+    await refreshChatList();
+  } catch (error) {
+    fail(error);
+  }
+}
+
+async function removeChat(chat) {
+  const question =
+    `Удалить чат «${chat.title}» со всеми сообщениями?\n\n` +
+    "Восстановить его будет нельзя — данные стираются из файла базы.\n" +
+    "Расходы по нему останутся в статистике, но без текста.";
+  if (!confirm(question)) return;
+  try {
+    await api(`/api/chats/${chat.id}`, { method: "DELETE" });
+    if (state.chatId === chat.id) state.chatId = null;
+    await loadChats();
+  } catch (error) {
+    fail(error);
+  }
+}
+
 /* ------------------------------------------------------------- меню */
 
 function closeMenu() {
@@ -625,6 +780,7 @@ function openPersonaMenu() {
 
   const anchor = $("persona-button").getBoundingClientRect();
   menu.classList.remove("hidden");
+  menu.style.top = "";
   menu.style.left = anchor.left + "px";
   menu.style.bottom = window.innerHeight - anchor.top + 8 + "px";
   $("overlay").classList.remove("hidden");

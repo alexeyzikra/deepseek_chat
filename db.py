@@ -6,6 +6,7 @@ journal_mode=DELETE, а не WAL: файл -wal хранил бы копии у�
 """
 
 import sqlite3
+from contextlib import contextmanager
 from datetime import datetime, timezone
 
 import config
@@ -88,9 +89,42 @@ def connect() -> sqlite3.Connection:
     return conn
 
 
+@contextmanager
+def session():
+    """Соединение, которое закрывается.
+
+    У sqlite3 `with conn` только фиксирует транзакцию, но НЕ закрывает
+    соединение — на каждый запрос оставался бы открытый файловый дескриптор.
+    """
+    conn = connect()
+    try:
+        yield conn
+        conn.commit()
+    except BaseException:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
 def init() -> None:
-    with connect() as conn:
+    with session() as conn:
         conn.executescript(SCHEMA)
+
+
+def vacuum() -> None:
+    """Пересобирает файл базы после удаления.
+
+    secure_delete уже затирает освобождённые страницы нулями, VACUUM вдобавок
+    выбрасывает их из файла. Запускается на отдельном соединении без
+    транзакции: внутри транзакции SQLite VACUUM не выполняет.
+    """
+    conn = sqlite3.connect(config.DB_PATH, isolation_level=None)
+    try:
+        conn.execute("PRAGMA secure_delete = ON")
+        conn.execute("VACUUM")
+    finally:
+        conn.close()
 
 
 def get_state(conn: sqlite3.Connection, key: str) -> str | None:

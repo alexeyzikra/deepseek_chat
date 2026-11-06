@@ -42,13 +42,15 @@ class AppendIn(BaseModel):
 
 class ChatPatchIn(BaseModel):
     system_prompt: str | None = None
+    title: str | None = None
+    pinned: bool | None = None
 
 
 # ------------------------------------------------------------------ состояние
 
 @app.get("/api/bootstrap")
 def bootstrap():
-    with db.connect() as conn:
+    with db.session() as conn:
         personas = [
             dict(r)
             for r in conn.execute(
@@ -71,7 +73,7 @@ def create_persona(body: PersonaIn):
     name = body.name.strip()
     if not name:
         raise HTTPException(400, "У личности должно быть имя")
-    with db.connect() as conn:
+    with db.session() as conn:
         cur = conn.execute(
             "INSERT INTO persona (name, system_prompt, thinking_enabled, created_at) "
             "VALUES (?, ?, ?, ?)",
@@ -84,7 +86,7 @@ def create_persona(body: PersonaIn):
 
 @app.post("/api/current-persona")
 def set_current_persona(body: CurrentPersonaIn):
-    with db.connect() as conn:
+    with db.session() as conn:
         row = conn.execute(
             "SELECT id FROM persona WHERE id = ? AND deleted_at IS NULL",
             (body.persona_id,),
@@ -97,7 +99,7 @@ def set_current_persona(body: CurrentPersonaIn):
 
 @app.get("/api/personas/{persona_id}")
 def get_persona(persona_id: int):
-    with db.connect() as conn:
+    with db.session() as conn:
         row = conn.execute(
             "SELECT id, name, system_prompt, thinking_enabled FROM persona "
             "WHERE id = ? AND deleted_at IS NULL",
@@ -112,7 +114,7 @@ def get_persona(persona_id: int):
 
 @app.get("/api/personas/{persona_id}/chats")
 def list_chats(persona_id: int):
-    with db.connect() as conn:
+    with db.session() as conn:
         rows = conn.execute(
             "SELECT id, number, title, pinned, created_at FROM chat "
             "WHERE persona_id = ? AND deleted_at IS NULL "
@@ -124,7 +126,7 @@ def list_chats(persona_id: int):
 
 @app.post("/api/personas/{persona_id}/chats")
 def create_chat(persona_id: int):
-    with db.connect() as conn:
+    with db.session() as conn:
         persona = conn.execute(
             "SELECT * FROM persona WHERE id = ? AND deleted_at IS NULL", (persona_id,)
         ).fetchone()
@@ -147,7 +149,7 @@ def create_chat(persona_id: int):
 
 @app.get("/api/chats/{chat_id}")
 def get_chat(chat_id: int):
-    with db.connect() as conn:
+    with db.session() as conn:
         chat = conn.execute(
             "SELECT * FROM chat WHERE id = ? AND deleted_at IS NULL", (chat_id,)
         ).fetchone()
@@ -280,7 +282,7 @@ def _completion_stream(
             tariff,
         )
 
-        with db.connect() as conn:
+        with db.session() as conn:
             conn.execute(
                 "DELETE FROM message WHERE chat_id = ? AND position > ?",
                 (chat_id, truncate_after),
@@ -361,7 +363,7 @@ def send(chat_id: int, body: SendIn):
     text = body.content.strip()
     if not text:
         raise HTTPException(400, "Пустое сообщение")
-    with db.connect() as conn:
+    with db.session() as conn:
         chat = _chat_or_404(conn, chat_id)
         persona = conn.execute(
             "SELECT * FROM persona WHERE id = ?", (chat["persona_id"],)
@@ -381,7 +383,7 @@ def regenerate(message_id: int):
 
     Хвост удаляется только после удачного ответа — см. _completion_stream.
     """
-    with db.connect() as conn:
+    with db.session() as conn:
         message = conn.execute(
             "SELECT * FROM message WHERE id = ?", (message_id,)
         ).fetchone()
@@ -405,7 +407,7 @@ def edit_message(message_id: int, body: SendIn):
     """Меняет текст в истории. Ничего не перегенерирует и не стоит денег."""
     if not body.content.strip():
         raise HTTPException(400, "Пустое сообщение. Чтобы убрать — удали его.")
-    with db.connect() as conn:
+    with db.session() as conn:
         cur = conn.execute(
             "UPDATE message SET content = ? WHERE id = ?", (body.content, message_id)
         )
@@ -417,7 +419,7 @@ def edit_message(message_id: int, body: SendIn):
 @app.delete("/api/messages/{message_id}")
 def delete_message(message_id: int):
     """Удаляет сообщение и весь хвост после него."""
-    with db.connect() as conn:
+    with db.session() as conn:
         message = conn.execute(
             "SELECT chat_id, position FROM message WHERE id = ?", (message_id,)
         ).fetchone()
@@ -435,7 +437,7 @@ def append_message(chat_id: int, body: AppendIn):
     """Дописывает сообщение в историю, не обращаясь к API. Денег не стоит."""
     if body.role not in ("user", "assistant"):
         raise HTTPException(400, "Роль должна быть user или assistant")
-    with db.connect() as conn:
+    with db.session() as conn:
         _chat_or_404(conn, chat_id)
         last = conn.execute(
             "SELECT role, position FROM message WHERE chat_id = ? "
@@ -456,14 +458,103 @@ def append_message(chat_id: int, body: AppendIn):
 
 @app.patch("/api/chats/{chat_id}")
 def patch_chat(chat_id: int, body: ChatPatchIn):
-    """Системный промпт этого чата. На другие чаты и на личность не влияет."""
-    with db.connect() as conn:
+    """Промпт, заголовок, закрепление. Промпт действует только на этот чат."""
+    with db.session() as conn:
         _chat_or_404(conn, chat_id)
         if body.system_prompt is not None:
             conn.execute(
                 "UPDATE chat SET system_prompt = ? WHERE id = ?",
                 (body.system_prompt, chat_id),
             )
+        if body.title is not None:
+            title = body.title.strip()
+            if not title:
+                raise HTTPException(400, "Пустой заголовок")
+            conn.execute("UPDATE chat SET title = ? WHERE id = ?", (title, chat_id))
+        if body.pinned is not None:
+            conn.execute(
+                "UPDATE chat SET pinned = ? WHERE id = ?", (int(body.pinned), chat_id)
+            )
+    return {"ok": True}
+
+
+# ------------------------------------------------------- форк и удаление
+
+@app.post("/api/messages/{message_id}/fork")
+def fork_from_message(message_id: int):
+    """Новый чат с копией истории до этого сообщения включительно.
+
+    Только от ответа бота: копия обязана заканчиваться его репликой, иначе
+    следующее сообщение пользователя станет вторым подряд. Форк от последнего
+    ответа — это просто дубликат чата.
+    """
+    with db.session() as conn:
+        message = conn.execute(
+            "SELECT * FROM message WHERE id = ?", (message_id,)
+        ).fetchone()
+        if not message:
+            raise HTTPException(404, "Сообщение не найдено")
+        if message["role"] != "assistant":
+            raise HTTPException(
+                400,
+                "Форк делается от ответа бота: копия должна заканчиваться "
+                "его репликой, иначе дальше пойдут два твоих сообщения подряд.",
+            )
+        source = _chat_or_404(conn, message["chat_id"])
+        persona = conn.execute(
+            "SELECT * FROM persona WHERE id = ?", (source["persona_id"],)
+        ).fetchone()
+
+        number = persona["next_chat_number"]
+        conn.execute(
+            "UPDATE persona SET next_chat_number = ? WHERE id = ?",
+            (number + 1, persona["id"]),
+        )
+        cur = conn.execute(
+            "INSERT INTO chat (persona_id, number, title, system_prompt, "
+            "forked_from_chat_id, forked_at_position, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (
+                persona["id"],
+                number,
+                f"{number:02d}",
+                source["system_prompt"],
+                source["id"],
+                message["position"],
+                db.now(),
+            ),
+        )
+        new_id = cur.lastrowid
+        conn.execute(
+            "INSERT INTO message "
+            "(chat_id, position, role, content, reasoning_content, created_at) "
+            "SELECT ?, position, role, content, reasoning_content, ? "
+            "FROM message WHERE chat_id = ? AND position <= ? ORDER BY position",
+            (new_id, db.now(), source["id"], message["position"]),
+        )
+        copied = conn.execute(
+            "SELECT COUNT(*) AS c FROM message WHERE chat_id = ?", (new_id,)
+        ).fetchone()["c"]
+
+    return {"id": new_id, "title": f"{number:02d}", "copied": copied}
+
+
+@app.delete("/api/chats/{chat_id}")
+def delete_chat(chat_id: int):
+    """Безвозвратно: сообщения и промпт стираются, вернуть их нельзя.
+
+    Остаётся обезличенная строка — только номер — чтобы расходы по этому чату
+    не выпали из статистики. Журнал вызовов не трогаем никогда.
+    """
+    with db.session() as conn:
+        chat = _chat_or_404(conn, chat_id)
+        conn.execute("DELETE FROM message WHERE chat_id = ?", (chat_id,))
+        conn.execute(
+            "UPDATE chat SET deleted_at = ?, system_prompt = '', title = ? "
+            "WHERE id = ?",
+            (db.now(), f"Удалённый чат №{chat['number']:02d}", chat_id),
+        )
+    db.vacuum()
     return {"ok": True}
 
 
