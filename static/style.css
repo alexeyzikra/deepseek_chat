@@ -13,8 +13,10 @@
   --shadow: 0 10px 30px rgba(0, 0, 0, .45);
   --radius: 14px;
   /* Ширина ленты сообщений. Поставь меньше — лента соберётся к центру,
-     больше — разъедется к краям окна. Отступ от краёв задаёт --gutter. */
-  --column: 1500px;
+     больше — разъедется к краям окна. Отступ от краёв задаёт --gutter.
+     840 = 745 содержимого + два отступа по 48: столько же, сколько
+     намерено по снимку самого DeepSeek. */
+  --column: 840px;
   --gutter: 48px;
   --font: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
   --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
@@ -300,7 +302,7 @@ button { cursor: pointer; font-family: var(--font); }
   background: var(--bg-bubble);
   border-radius: var(--radius);
   padding: 10px 14px;
-  max-width: min(60%, 60ch);
+  max-width: 75%;
 }
 .msg .body { word-break: break-word; }
 .msg-user .body { white-space: pre-wrap; }
