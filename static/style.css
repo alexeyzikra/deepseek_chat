@@ -280,7 +280,14 @@ button { cursor: pointer; font-family: var(--font); }
 }
 
 .msg { margin-bottom: 26px; }
-.msg-user { display: flex; justify-content: flex-end; }
+/* Колонкой, а не строкой: в строке кнопки действий становятся соседом
+   пузыря и отжимают его от правого края на свою ширину — причём и тогда,
+   когда они прозрачные, потому что место они всё равно занимают. */
+.msg-user {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+}
 .msg-user .body {
   background: var(--bg-bubble);
   border-radius: var(--radius);
