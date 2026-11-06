@@ -275,6 +275,7 @@ button { cursor: pointer; font-family: var(--font); }
 }
 .composer textarea {
   flex: 1;
+  resize: none;
   max-height: 220px;
   border-radius: var(--radius);
   padding: 12px 14px;

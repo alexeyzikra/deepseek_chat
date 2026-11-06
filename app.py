@@ -126,13 +126,14 @@ def create_chat(persona_id: int):
             "UPDATE persona SET next_chat_number = ? WHERE id = ?",
             (number + 1, persona_id),
         )
+        title = f"{number:02d}"
         cur = conn.execute(
             "INSERT INTO chat (persona_id, number, title, system_prompt, created_at) "
             "VALUES (?, ?, ?, ?, ?)",
-            (persona_id, number, f"Чат {number}", persona["system_prompt"], db.now()),
+            (persona_id, number, title, persona["system_prompt"], db.now()),
         )
         chat_id = cur.lastrowid
-    return {"id": chat_id, "number": number, "title": f"Чат {number}"}
+    return {"id": chat_id, "number": number, "title": title}
 
 
 @app.get("/api/chats/{chat_id}")
