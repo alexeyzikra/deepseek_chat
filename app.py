@@ -35,6 +35,15 @@ class SendIn(BaseModel):
     content: str
 
 
+class AppendIn(BaseModel):
+    role: str
+    content: str
+
+
+class ChatPatchIn(BaseModel):
+    system_prompt: str | None = None
+
+
 # ------------------------------------------------------------------ состояние
 
 @app.get("/api/bootstrap")
@@ -181,13 +190,25 @@ def get_chat(chat_id: int):
     }
 
 
-# ------------------------------------------------------------------ отправка
+# ------------------------------------------------------- история и проверки
 
-def _history(conn, chat) -> list[dict]:
-    rows = conn.execute(
-        "SELECT role, content FROM message WHERE chat_id = ? ORDER BY position",
-        (chat["id"],),
-    ).fetchall()
+def _chat_or_404(conn, chat_id: int):
+    chat = conn.execute(
+        "SELECT * FROM chat WHERE id = ? AND deleted_at IS NULL", (chat_id,)
+    ).fetchone()
+    if not chat:
+        raise HTTPException(404, "Чат не найден")
+    return chat
+
+
+def _history(conn, chat, upto_position: int | None = None) -> list[dict]:
+    sql = "SELECT role, content FROM message WHERE chat_id = ?"
+    args: list = [chat["id"]]
+    if upto_position is not None:
+        sql += " AND position <= ?"
+        args.append(upto_position)
+    rows = conn.execute(sql + " ORDER BY position", args).fetchall()
+
     payload = []
     if chat["system_prompt"].strip():
         payload.append({"role": "system", "content": chat["system_prompt"]})
@@ -202,61 +223,41 @@ def _check_alternation(payload: list[dict]) -> None:
         if item["role"] == "system":
             continue
         if item["role"] == previous:
+            who = "твоих" if previous == "user" else "ответов бота"
             raise HTTPException(
                 409,
-                "История сломана: два сообщения подряд с ролью "
-                f"«{previous}». Запрос не отправлен, поправь историю.",
+                f"История сломана: два {who} сообщения подряд. "
+                "Запрос не отправлен — поправь историю и попробуй снова.",
             )
         previous = item["role"]
 
 
-@app.post("/api/chats/{chat_id}/send")
-def send(chat_id: int, body: SendIn):
-    text = body.content.strip()
-    if not text:
-        raise HTTPException(400, "Пустое сообщение")
+# ------------------------------------------------------------- генерация
 
-    with db.connect() as conn:
-        chat = conn.execute(
-            "SELECT * FROM chat WHERE id = ? AND deleted_at IS NULL", (chat_id,)
-        ).fetchone()
-        if not chat:
-            raise HTTPException(404, "Чат не найден")
-        persona = conn.execute(
-            "SELECT * FROM persona WHERE id = ?", (chat["persona_id"],)
-        ).fetchone()
+def _completion_stream(
+    chat,
+    persona,
+    payload: list[dict],
+    truncate_after: int,
+    pending_user_text: str | None = None,
+) -> StreamingResponse:
+    """Стримит ответ и пишет в базу ТОЛЬКО после удачного запроса.
 
-        position = (
-            conn.execute(
-                "SELECT COALESCE(MAX(position), 0) AS p FROM message WHERE chat_id = ?",
-                (chat_id,),
-            ).fetchone()["p"]
-            + 1
-        )
-        cur = conn.execute(
-            "INSERT INTO message (chat_id, position, role, content, created_at) "
-            "VALUES (?, ?, 'user', ?, ?)",
-            (chat_id, position, text, db.now()),
-        )
-        user_message_id = cur.lastrowid
-        payload = _history(conn, chat)
+    До этого момента история не меняется вообще: оборвавшийся запрос не
+    должен стирать хвост, который пользователь собирал руками.
 
-    try:
-        _check_alternation(payload)
-    except HTTPException:
-        with db.connect() as conn:
-            conn.execute("DELETE FROM message WHERE id = ?", (user_message_id,))
-        raise
-
-    thinking = bool(persona["thinking_enabled"])
+    truncate_after — позиция, после которой хвост удаляется (перегенерация).
+    pending_user_text — сообщение, которое надо сохранить вместе с ответом.
+    """
+    chat_id = chat["id"]
     persona_id = chat["persona_id"]
+    thinking = bool(persona["thinking_enabled"])
 
     def events() -> Iterator[str]:
         content_parts: list[str] = []
         reasoning_parts: list[str] = []
         usage: dict | None = None
         try:
-            yield _sse({"type": "user_saved", "message_id": user_message_id})
             for piece in deepseek_client.stream_reply(payload, thinking):
                 if "reasoning" in piece:
                     reasoning_parts.append(piece["reasoning"])
@@ -267,9 +268,6 @@ def send(chat_id: int, body: SendIn):
                 elif "usage" in piece:
                     usage = piece["usage"]
         except Exception as exc:
-            # Запрос не удался — убираем сообщение, чтобы история осталась целой.
-            with db.connect() as conn:
-                conn.execute("DELETE FROM message WHERE id = ?", (user_message_id,))
             yield _sse({"type": "error", "message": str(exc)})
             return
 
@@ -281,20 +279,38 @@ def send(chat_id: int, body: SendIn):
             usage.get("output_tokens", 0),
             tariff,
         )
+
         with db.connect() as conn:
+            conn.execute(
+                "DELETE FROM message WHERE chat_id = ? AND position > ?",
+                (chat_id, truncate_after),
+            )
+            position = truncate_after
+            user_message_id = None
+            if pending_user_text is not None:
+                position += 1
+                cur = conn.execute(
+                    "INSERT INTO message (chat_id, position, role, content, created_at) "
+                    "VALUES (?, ?, 'user', ?, ?)",
+                    (chat_id, position, pending_user_text, db.now()),
+                )
+                user_message_id = cur.lastrowid
+
+            position += 1
             cur = conn.execute(
                 "INSERT INTO message "
                 "(chat_id, position, role, content, reasoning_content, created_at) "
                 "VALUES (?, ?, 'assistant', ?, ?, ?)",
                 (
                     chat_id,
-                    position + 1,
+                    position,
                     "".join(content_parts),
                     "".join(reasoning_parts) or None,
                     db.now(),
                 ),
             )
             assistant_message_id = cur.lastrowid
+
             conn.execute(
                 "INSERT INTO api_call (created_at, persona_id, chat_id, message_id, "
                 "model, cache_hit_tokens, cache_miss_tokens, output_tokens, "
@@ -324,6 +340,7 @@ def send(chat_id: int, body: SendIn):
             {
                 "type": "done",
                 "message_id": assistant_message_id,
+                "user_message_id": user_message_id,
                 "cost_millicents": pricing.to_millicents(usd),
                 "chat_spent_millicents": pricing.to_millicents(spent),
                 "context_tokens": usage.get("prompt_tokens", 0),
@@ -337,6 +354,117 @@ def send(chat_id: int, body: SendIn):
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
+
+
+@app.post("/api/chats/{chat_id}/send")
+def send(chat_id: int, body: SendIn):
+    text = body.content.strip()
+    if not text:
+        raise HTTPException(400, "Пустое сообщение")
+    with db.connect() as conn:
+        chat = _chat_or_404(conn, chat_id)
+        persona = conn.execute(
+            "SELECT * FROM persona WHERE id = ?", (chat["persona_id"],)
+        ).fetchone()
+        last = conn.execute(
+            "SELECT COALESCE(MAX(position), 0) AS p FROM message WHERE chat_id = ?",
+            (chat_id,),
+        ).fetchone()["p"]
+        payload = _history(conn, chat) + [{"role": "user", "content": text}]
+    _check_alternation(payload)
+    return _completion_stream(chat, persona, payload, last, text)
+
+
+@app.post("/api/messages/{message_id}/regenerate")
+def regenerate(message_id: int):
+    """Стирает всё после этого сообщения и получает ответ заново.
+
+    Хвост удаляется только после удачного ответа — см. _completion_stream.
+    """
+    with db.connect() as conn:
+        message = conn.execute(
+            "SELECT * FROM message WHERE id = ?", (message_id,)
+        ).fetchone()
+        if not message:
+            raise HTTPException(404, "Сообщение не найдено")
+        if message["role"] != "user":
+            raise HTTPException(400, "Перегенерировать можно только своё сообщение")
+        chat = _chat_or_404(conn, message["chat_id"])
+        persona = conn.execute(
+            "SELECT * FROM persona WHERE id = ?", (chat["persona_id"],)
+        ).fetchone()
+        payload = _history(conn, chat, upto_position=message["position"])
+    _check_alternation(payload)
+    return _completion_stream(chat, persona, payload, message["position"])
+
+
+# --------------------------------------------------- правка без запроса
+
+@app.patch("/api/messages/{message_id}")
+def edit_message(message_id: int, body: SendIn):
+    """Меняет текст в истории. Ничего не перегенерирует и не стоит денег."""
+    if not body.content.strip():
+        raise HTTPException(400, "Пустое сообщение. Чтобы убрать — удали его.")
+    with db.connect() as conn:
+        cur = conn.execute(
+            "UPDATE message SET content = ? WHERE id = ?", (body.content, message_id)
+        )
+        if cur.rowcount == 0:
+            raise HTTPException(404, "Сообщение не найдено")
+    return {"ok": True}
+
+
+@app.delete("/api/messages/{message_id}")
+def delete_message(message_id: int):
+    """Удаляет сообщение и весь хвост после него."""
+    with db.connect() as conn:
+        message = conn.execute(
+            "SELECT chat_id, position FROM message WHERE id = ?", (message_id,)
+        ).fetchone()
+        if not message:
+            raise HTTPException(404, "Сообщение не найдено")
+        cur = conn.execute(
+            "DELETE FROM message WHERE chat_id = ? AND position >= ?",
+            (message["chat_id"], message["position"]),
+        )
+    return {"deleted": cur.rowcount}
+
+
+@app.post("/api/chats/{chat_id}/messages")
+def append_message(chat_id: int, body: AppendIn):
+    """Дописывает сообщение в историю, не обращаясь к API. Денег не стоит."""
+    if body.role not in ("user", "assistant"):
+        raise HTTPException(400, "Роль должна быть user или assistant")
+    with db.connect() as conn:
+        _chat_or_404(conn, chat_id)
+        last = conn.execute(
+            "SELECT role, position FROM message WHERE chat_id = ? "
+            "ORDER BY position DESC LIMIT 1",
+            (chat_id,),
+        ).fetchone()
+        if last and last["role"] == body.role:
+            who = "твоих" if body.role == "user" else "ответов бота"
+            raise HTTPException(409, f"Двух {who} сообщений подряд быть не должно")
+        position = (last["position"] if last else 0) + 1
+        cur = conn.execute(
+            "INSERT INTO message (chat_id, position, role, content, created_at) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (chat_id, position, body.role, body.content, db.now()),
+        )
+    return {"id": cur.lastrowid, "position": position}
+
+
+@app.patch("/api/chats/{chat_id}")
+def patch_chat(chat_id: int, body: ChatPatchIn):
+    """Системный промпт этого чата. На другие чаты и на личность не влияет."""
+    with db.connect() as conn:
+        _chat_or_404(conn, chat_id)
+        if body.system_prompt is not None:
+            conn.execute(
+                "UPDATE chat SET system_prompt = ? WHERE id = ?",
+                (body.system_prompt, chat_id),
+            )
+    return {"ok": True}
 
 
 def _sse(payload: dict) -> str:

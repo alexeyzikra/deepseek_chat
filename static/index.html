@@ -55,16 +55,24 @@
     </header>
 
     <div id="scroll" class="scroll">
-      <details id="system-block" class="system-block hidden">
+      <details id="system-block" class="system-block">
         <summary>Системный промпт</summary>
-        <pre id="system-text"></pre>
+        <div id="system-view">
+          <pre id="system-text"></pre>
+          <button id="system-edit" class="link-button">Изменить</button>
+        </div>
       </details>
       <div id="messages" class="messages"></div>
     </div>
 
-    <div class="composer">
-      <textarea id="input" rows="1" placeholder="Сообщение…"></textarea>
-      <button id="send" class="send" title="Отправить">↑</button>
+    <div class="composer-wrap">
+      <div id="tail-controls" class="tail-controls hidden"></div>
+      <div class="composer">
+        <textarea id="input" rows="1" placeholder="Сообщение…"></textarea>
+        <button id="append-user" class="ghost-button"
+                title="Положить в историю, не обращаясь к API">без запроса</button>
+        <button id="send" class="send" title="Отправить">↑</button>
+      </div>
     </div>
   </main>
 </div>

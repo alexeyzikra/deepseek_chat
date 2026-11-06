@@ -6,7 +6,9 @@ const state = {
   persona: null,
   chats: [],
   chatId: null,
-  sending: false,
+  chat: null,
+  messages: [],
+  busy: false,
 };
 
 const $ = (id) => document.getElementById(id);
@@ -24,6 +26,10 @@ async function api(path, options = {}) {
     throw new Error(detail);
   }
   return response.status === 204 ? null : response.json();
+}
+
+function fail(error) {
+  alert(error.message || String(error));
 }
 
 /* ------------------------------------------------------------- запуск */
@@ -67,10 +73,13 @@ async function loadChats() {
     await openChat(stillThere ? state.chatId : state.chats[0].id);
   } else {
     state.chatId = null;
+    state.chat = null;
+    state.messages = [];
     $("messages").replaceChildren();
     $("chat-title").textContent = "";
     $("chat-meta").textContent = "";
     $("system-block").classList.add("hidden");
+    updateComposer();
   }
 }
 
@@ -85,7 +94,7 @@ function renderChats() {
     const button = document.createElement("button");
     button.className = "chat-item" + (chat.id === state.chatId ? " active" : "");
     button.textContent = chat.title;
-    button.onclick = () => openChat(chat.id);
+    button.onclick = () => openChat(chat.id).catch(fail);
     list.appendChild(button);
   };
 
@@ -110,24 +119,18 @@ function renderChats() {
   }
 }
 
-async function openChat(id) {
+async function openChat(id, keepScroll = false) {
   const data = await api(`/api/chats/${id}`);
   state.chatId = id;
+  state.chat = data.chat;
+  state.messages = data.messages;
   renderChats();
 
   $("chat-title").textContent = data.chat.title;
   updateMeta(data.spent_millicents, data.context_tokens, data.context_limit);
-
-  const prompt = (data.chat.system_prompt || "").trim();
-  $("system-block").classList.toggle("hidden", !prompt);
-  $("system-text").textContent = prompt;
-
-  const container = $("messages");
-  container.replaceChildren();
-  for (const message of data.messages) {
-    container.appendChild(messageElement(message));
-  }
-  scrollDown(true);
+  renderSystemPrompt();
+  renderMessages();
+  if (!keepScroll) scrollDown(true);
 }
 
 function updateMeta(spent, tokens, limit) {
@@ -147,6 +150,44 @@ function formatCost(millicents) {
   return `$${(millicents / 100000).toFixed(2)}`;
 }
 
+/* ------------------------------------------------- системный промпт */
+
+function renderSystemPrompt() {
+  const block = $("system-block");
+  block.classList.remove("hidden");
+  const view = $("system-view");
+  view.replaceChildren();
+
+  const text = state.chat.system_prompt || "";
+  const pre = document.createElement("pre");
+  pre.textContent = text.trim() || "— пусто —";
+  const edit = document.createElement("button");
+  edit.className = "link-button";
+  edit.textContent = "Изменить";
+  edit.onclick = () => editSystemPrompt();
+  view.append(pre, edit);
+}
+
+function editSystemPrompt() {
+  const view = $("system-view");
+  $("system-block").open = true;
+  const editor = buildEditor(
+    state.chat.system_prompt || "",
+    "Действует только на этот чат. Промпт личности и другие чаты не меняются.",
+    async (value) => {
+      await api(`/api/chats/${state.chatId}`, {
+        method: "PATCH",
+        body: JSON.stringify({ system_prompt: value }),
+      });
+      state.chat.system_prompt = value;
+      renderSystemPrompt();
+    },
+    renderSystemPrompt
+  );
+  view.replaceChildren(editor);
+  editor.querySelector("textarea").focus();
+}
+
 /* --------------------------------------------------------- сообщения */
 
 function renderBody(element, text) {
@@ -164,7 +205,27 @@ function renderBody(element, text) {
   });
 }
 
-function messageElement(message) {
+function reasoningElement(text) {
+  const details = document.createElement("details");
+  details.className = "reasoning";
+  const summary = document.createElement("summary");
+  summary.textContent = "Размышление";
+  const content = document.createElement("div");
+  content.textContent = text;
+  details.append(summary, content);
+  return details;
+}
+
+function renderMessages() {
+  const container = $("messages");
+  container.replaceChildren();
+  state.messages.forEach((message, index) => {
+    container.appendChild(messageElement(message, index));
+  });
+  updateComposer();
+}
+
+function messageElement(message, index) {
   const wrapper = document.createElement("div");
   wrapper.className = "msg msg-" + message.role;
   wrapper.dataset.id = message.id;
@@ -184,43 +245,131 @@ function messageElement(message) {
     cost.textContent = formatCost(message.cost_millicents);
     wrapper.appendChild(cost);
   }
+
+  wrapper.appendChild(actionsRow(message, index, wrapper));
   return wrapper;
 }
 
-function reasoningElement(text) {
-  const details = document.createElement("details");
-  details.className = "reasoning";
-  const summary = document.createElement("summary");
-  summary.textContent = "Размышление";
-  const content = document.createElement("div");
-  content.textContent = text;
-  details.append(summary, content);
-  return details;
+function actionsRow(message, index, wrapper) {
+  const row = document.createElement("div");
+  row.className = "actions";
+
+  const add = (label, handler, danger) => {
+    const button = document.createElement("button");
+    button.className = "action" + (danger ? " danger" : "");
+    button.textContent = label;
+    button.onclick = handler;
+    row.appendChild(button);
+    return button;
+  };
+
+  add("копировать", async () => {
+    try {
+      await navigator.clipboard.writeText(message.content);
+    } catch (_) {}
+  });
+
+  add("изменить", () => startEdit(message, wrapper));
+
+  if (message.role === "user") {
+    add("перегенерировать", () => regenerate(message, index));
+  }
+
+  // Удаляется это сообщение и весь хвост после него.
+  const tail = state.messages.length - index;
+  add(
+    "удалить",
+    async () => {
+      const question =
+        tail > 1
+          ? `Удалить это сообщение и ещё ${tail - 1} после него? Отменить нельзя.`
+          : "Удалить это сообщение?";
+      if (!confirm(question)) return;
+      try {
+        await api(`/api/messages/${message.id}`, { method: "DELETE" });
+        await openChat(state.chatId, true);
+      } catch (error) {
+        fail(error);
+      }
+    },
+    true
+  );
+
+  return row;
 }
 
-function scrollDown(force) {
-  const scroll = $("scroll");
-  const nearBottom =
-    scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight < 150;
-  if (force || nearBottom) scroll.scrollTop = scroll.scrollHeight;
+/* ------------------------------------------------------------ правка */
+
+function buildEditor(value, hint, onSave, onCancel) {
+  const box = document.createElement("div");
+  box.className = "editor";
+
+  const area = document.createElement("textarea");
+  area.value = value;
+  box.appendChild(area);
+
+  const buttons = document.createElement("div");
+  buttons.className = "editor-buttons";
+
+  const save = document.createElement("button");
+  save.className = "save";
+  save.textContent = "Сохранить";
+  save.onclick = async () => {
+    save.disabled = true;
+    try {
+      await onSave(area.value);
+    } catch (error) {
+      fail(error);
+      save.disabled = false;
+    }
+  };
+
+  const cancel = document.createElement("button");
+  cancel.textContent = "Отмена";
+  cancel.onclick = () => onCancel();
+
+  buttons.append(save, cancel);
+  box.appendChild(buttons);
+
+  if (hint) {
+    const note = document.createElement("div");
+    note.className = "editor-hint";
+    note.textContent = hint;
+    box.appendChild(note);
+  }
+
+  area.style.height = "auto";
+  setTimeout(() => {
+    area.style.height = Math.max(area.scrollHeight, 90) + "px";
+  }, 0);
+  return box;
 }
 
-/* -------------------------------------------------------- отправка */
+function startEdit(message, wrapper) {
+  const hint =
+    message.role === "assistant"
+      ? "Это попадёт в историю как его собственный ответ. Ничего не перегенерируется."
+      : "Меняется только история. Чтобы получить новый ответ — перегенерируй.";
 
-async function send() {
-  const input = $("input");
-  const text = input.value.trim();
-  if (!text || state.sending || !state.chatId) return;
+  const editor = buildEditor(
+    message.content,
+    hint,
+    async (value) => {
+      await api(`/api/messages/${message.id}`, {
+        method: "PATCH",
+        body: JSON.stringify({ content: value }),
+      });
+      await openChat(state.chatId, true);
+    },
+    () => renderMessages()
+  );
+  wrapper.replaceChildren(editor);
+  editor.querySelector("textarea").focus();
+}
 
-  state.sending = true;
-  $("send").disabled = true;
-  input.value = "";
-  resizeInput();
+/* ------------------------------------------------------- генерация */
 
-  const container = $("messages");
-  container.appendChild(messageElement({ id: 0, role: "user", content: text }));
-  scrollDown(true);
-
+function pendingAssistantElement() {
   const wrapper = document.createElement("div");
   wrapper.className = "msg msg-assistant";
   const reasoning = reasoningElement("");
@@ -228,76 +377,203 @@ async function send() {
   const body = document.createElement("div");
   body.className = "body";
   wrapper.append(reasoning, body);
-  container.appendChild(wrapper);
+  return wrapper;
+}
 
+async function streamInto(url, payload, wrapper) {
+  const reasoning = wrapper.querySelector(".reasoning");
+  const body = wrapper.querySelector(".body");
   let contentText = "";
   let reasoningText = "";
 
-  try {
-    const response = await fetch(`/api/chats/${state.chatId}/send`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ content: text }),
-    });
-    if (!response.ok) {
-      let detail = response.statusText;
-      try {
-        detail = (await response.json()).detail || detail;
-      } catch (_) {}
-      throw new Error(detail);
-    }
+  const response = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: payload ? JSON.stringify(payload) : null,
+  });
+  if (!response.ok) {
+    let detail = response.statusText;
+    try {
+      detail = (await response.json()).detail || detail;
+    } catch (_) {}
+    throw new Error(detail);
+  }
 
-    const reader = response.body.getReader();
-    const decoder = new TextDecoder();
-    let buffer = "";
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
 
-    for (;;) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      buffer += decoder.decode(value, { stream: true });
-      let split;
-      while ((split = buffer.indexOf("\n\n")) >= 0) {
-        const raw = buffer.slice(0, split);
-        buffer = buffer.slice(split + 2);
-        if (!raw.startsWith("data: ")) continue;
-        const event = JSON.parse(raw.slice(6));
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    let split;
+    while ((split = buffer.indexOf("\n\n")) >= 0) {
+      const raw = buffer.slice(0, split);
+      buffer = buffer.slice(split + 2);
+      if (!raw.startsWith("data: ")) continue;
+      const event = JSON.parse(raw.slice(6));
 
-        if (event.type === "reasoning") {
-          reasoningText += event.text;
-          reasoning.classList.remove("hidden");
-          reasoning.querySelector("div").textContent = reasoningText;
-          scrollDown(false);
-        } else if (event.type === "content") {
-          contentText += event.text;
-          renderBody(body, contentText);
-          scrollDown(false);
-        } else if (event.type === "done") {
-          wrapper.dataset.id = event.message_id;
-          const cost = document.createElement("div");
-          cost.className = "cost";
-          cost.textContent = formatCost(event.cost_millicents);
-          wrapper.appendChild(cost);
-          updateMeta(
-            event.chat_spent_millicents,
-            event.context_tokens,
-            1_000_000
-          );
-        } else if (event.type === "error") {
-          throw new Error(event.message);
-        }
+      if (event.type === "reasoning") {
+        reasoningText += event.text;
+        reasoning.classList.remove("hidden");
+        reasoning.querySelector("div").textContent = reasoningText;
+        scrollDown(false);
+      } else if (event.type === "content") {
+        contentText += event.text;
+        renderBody(body, contentText);
+        scrollDown(false);
+      } else if (event.type === "error") {
+        throw new Error(event.message);
+      } else if (event.type === "done") {
+        return event;
       }
     }
+  }
+  throw new Error("Соединение оборвалось, ответ не сохранён");
+}
+
+async function runGeneration(url, payload, placeAfter) {
+  if (state.busy || !state.chatId) return;
+  state.busy = true;
+  updateComposer();
+
+  const wrapper = pendingAssistantElement();
+  if (placeAfter) placeAfter(wrapper);
+  else $("messages").appendChild(wrapper);
+  scrollDown(true);
+
+  try {
+    const done = await streamInto(url, payload, wrapper);
+    updateMeta(done.chat_spent_millicents, done.context_tokens, 1_000_000);
+    state.busy = false;
+    await openChat(state.chatId, true);
   } catch (error) {
     wrapper.classList.add("msg-error");
-    body.textContent = "Ошибка: " + error.message;
-    // Сервер убрал неотправленное сообщение, перечитываем чат целиком.
-    setTimeout(() => openChat(state.chatId), 1500);
+    wrapper.querySelector(".body").textContent = "Ошибка: " + error.message;
+    state.busy = false;
+    // Ничего не записалось и ничего не стёрлось — история осталась как была.
+    setTimeout(() => openChat(state.chatId, true).catch(fail), 2500);
   } finally {
-    state.sending = false;
-    $("send").disabled = false;
-    input.focus();
-    scrollDown(false);
+    state.busy = false;
+    updateComposer();
   }
+}
+
+async function send() {
+  const input = $("input");
+  const text = input.value.trim();
+  if (!text || state.busy || !state.chatId) return;
+  input.value = "";
+  resizeInput();
+
+  $("messages").appendChild(
+    messageElement({ id: 0, role: "user", content: text }, state.messages.length)
+  );
+  await runGeneration(`/api/chats/${state.chatId}/send`, { content: text });
+}
+
+async function regenerate(message, index) {
+  const tail = state.messages.length - index - 1;
+  if (tail > 1) {
+    const question = `Перегенерация сотрёт ${tail} сообщений после этого. Отменить нельзя. Продолжить?`;
+    if (!confirm(question)) return;
+  }
+  // Хвост убираем с экрана сразу, но на сервере он доживёт до удачного ответа.
+  const container = $("messages");
+  while (container.children.length > index + 1) {
+    container.lastElementChild.remove();
+  }
+  await runGeneration(`/api/messages/${message.id}/regenerate`, null);
+}
+
+/* ------------------------------------------- низ экрана и черновики */
+
+function updateComposer() {
+  const last = state.messages[state.messages.length - 1];
+  const waitingForBot = last && last.role === "user";
+  const hasChat = Boolean(state.chatId);
+
+  $("send").disabled = state.busy || !hasChat || waitingForBot;
+  $("append-user").disabled = state.busy || !hasChat || waitingForBot;
+  $("input").disabled = !hasChat || waitingForBot;
+
+  const controls = $("tail-controls");
+  controls.replaceChildren();
+  controls.classList.toggle("hidden", !waitingForBot || state.busy);
+  if (!waitingForBot || state.busy) return;
+
+  const note = document.createElement("span");
+  note.textContent = "Твоё сообщение в истории, ответа ещё нет:";
+  controls.appendChild(note);
+
+  const ask = document.createElement("button");
+  ask.textContent = "Получить ответ";
+  ask.onclick = () => regenerate(last, state.messages.length - 1);
+
+  const fake = document.createElement("button");
+  fake.textContent = "Ответить за бота";
+  fake.onclick = () => draftAssistant();
+
+  controls.append(ask, fake);
+}
+
+function draftAssistant() {
+  const draft = document.createElement("div");
+  draft.className = "draft";
+  const label = document.createElement("div");
+  label.className = "label";
+  label.textContent = "Ответ от лица бота — в API не уходит, денег не стоит";
+  const editor = buildEditor(
+    "",
+    "Дальше он увидит это как свой собственный ответ.",
+    async (value) => {
+      if (!value.trim()) {
+        draft.remove();
+        updateComposer();
+        return;
+      }
+      await api(`/api/chats/${state.chatId}/messages`, {
+        method: "POST",
+        body: JSON.stringify({ role: "assistant", content: value }),
+      });
+      draft.remove();
+      await openChat(state.chatId, true);
+    },
+    () => {
+      draft.remove();
+      updateComposer();
+    }
+  );
+  draft.append(label, editor);
+  $("messages").appendChild(draft);
+  $("tail-controls").classList.add("hidden");
+  editor.querySelector("textarea").focus();
+  scrollDown(true);
+}
+
+async function appendUser() {
+  const input = $("input");
+  const text = input.value.trim();
+  if (!text || state.busy || !state.chatId) return;
+  try {
+    await api(`/api/chats/${state.chatId}/messages`, {
+      method: "POST",
+      body: JSON.stringify({ role: "user", content: text }),
+    });
+    input.value = "";
+    resizeInput();
+    await openChat(state.chatId, true);
+  } catch (error) {
+    fail(error);
+  }
+}
+
+function scrollDown(force) {
+  const scroll = $("scroll");
+  const nearBottom =
+    scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight < 150;
+  if (force || nearBottom) scroll.scrollTop = scroll.scrollHeight;
 }
 
 /* ------------------------------------------------------------- меню */
@@ -395,22 +671,27 @@ $("setup-create").onclick = async () => {
 };
 
 $("new-chat").onclick = async () => {
-  const chat = await api(`/api/personas/${state.personaId}/chats`, { method: "POST" });
-  state.chatId = chat.id;
-  await loadChats();
-  $("input").focus();
+  try {
+    const chat = await api(`/api/personas/${state.personaId}/chats`, { method: "POST" });
+    state.chatId = chat.id;
+    await loadChats();
+    $("input").focus();
+  } catch (error) {
+    fail(error);
+  }
 };
 
 $("toggle-sidebar").onclick = () => $("app").classList.toggle("collapsed");
 $("persona-button").onclick = openPersonaMenu;
 $("overlay").onclick = closeMenu;
-$("send").onclick = send;
+$("send").onclick = () => send().catch(fail);
+$("append-user").onclick = () => appendUser().catch(fail);
 
 $("input").addEventListener("input", resizeInput);
 $("input").addEventListener("keydown", (event) => {
   if (event.key === "Enter" && !event.shiftKey) {
     event.preventDefault();
-    send();
+    send().catch(fail);
   }
 });
 
