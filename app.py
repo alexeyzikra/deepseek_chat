@@ -816,12 +816,30 @@ def balance():
 
 # -------------------------------------------------------------------- статика
 
-app.mount("/static", StaticFiles(directory=config.BASE_DIR / "static"), name="static")
+class NoCacheStatic(StaticFiles):
+    """Статика без кэширования.
+
+    Без заголовка Cache-Control браузер вправе взять свою копию файла
+    вообще не спрашивая сервер, и правки в CSS или JS до экрана не
+    доезжают. Для локального инструмента кэшировать нечего: файлы лежат
+    на том же диске, читаются мгновенно.
+    """
+
+    def file_response(self, *args, **kwargs):
+        response = super().file_response(*args, **kwargs)
+        response.headers["Cache-Control"] = "no-store"
+        return response
+
+
+app.mount("/static", NoCacheStatic(directory=config.BASE_DIR / "static"), name="static")
 
 
 @app.get("/")
 def index():
-    return FileResponse(config.BASE_DIR / "static" / "index.html")
+    return FileResponse(
+        config.BASE_DIR / "static" / "index.html",
+        headers={"Cache-Control": "no-store"},
+    )
 
 
 if __name__ == "__main__":
