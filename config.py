@@ -1,6 +1,7 @@
 """Настройки. Всё, что может понадобиться поменять, собрано здесь."""
 
 import os
+import pathlib
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -22,7 +23,10 @@ MAX_TOKENS = None
 
 CONTEXT_LIMIT = 1_000_000
 
-DB_PATH = BASE_DIR / "chats.db"
+# Обычно это chats.db рядом с проектом. Переменная нужна, чтобы можно было
+# запустить отдельный экземпляр на тестовой базе и не трогать настоящую:
+#   DEEPSEEK_CHAT_DB=test.db .venv/bin/python -m uvicorn app:app --port 8766
+DB_PATH = pathlib.Path(os.getenv("DEEPSEEK_CHAT_DB") or BASE_DIR / "chats.db")
 
 HOST = "127.0.0.1"
 PORT = 8765
