@@ -1,0 +1,46 @@
+#!/bin/sh
+# Последняя преграда перед публичной историей.
+#
+# Репозиторий открытый, а инструмент — для приватных разговоров. Опубликованный
+# коммит уже не отозвать: он расходится по чужим клонам и остаётся в кэше
+# гитхаба, и force-push этого не меняет. Поэтому проверяем не только .gitignore
+# (его легко обойти `git add -f` и легко сломать, переименовав базу), но и то,
+# что реально лежит в индексе.
+#
+# Включается один раз на клон:  git config core.hooksPath hooks
+# Обойти осознанно:             git commit --no-verify
+
+staged=$(git diff --cached --name-only --diff-filter=ACMR)
+[ -z "$staged" ] && exit 0
+
+bad=""
+
+# 1. Имена файлов, которых в истории быть не должно.
+for file in $staged; do
+    case "$file" in
+        .env.example) ;;
+        .env|.env.*|*/.env|*/.env.*)        bad="$bad\n  $file — ключ" ;;
+        *.db|*.sqlite|*.sqlite3)            bad="$bad\n  $file — база с перепиской" ;;
+        *-journal|*-wal|*-shm)              bad="$bad\n  $file — журнал базы" ;;
+        system_prompt.txt|*/system_prompt.txt) bad="$bad\n  $file — приватный промпт" ;;
+        .DS_Store|*/.DS_Store)              bad="$bad\n  $file — мусор macOS" ;;
+    esac
+done
+
+# 2. Ключ в тексте: длинная строка после sk- не бывает случайной.
+leaky=$(git diff --cached -U0 -- $staged \
+        | grep -E '^\+' | grep -oE 'sk-[A-Za-z0-9_-]{16,}' | head -3)
+# Сам ключ не печатаем: он попал бы в вывод терминала и в логи.
+if [ -n "$leaky" ]; then
+    bad="$bad\n  в добавленных строках есть sk-… — похоже на ключ API"
+fi
+
+if [ -n "$bad" ]; then
+    printf '\nКоммит остановлен: в индексе то, чему нельзя в публичную историю.\n'
+    printf "$bad\n"
+    printf '\nУбрать из индекса:  git restore --staged <файл>\n'
+    printf 'Если уверен:        git commit --no-verify\n\n'
+    exit 1
+fi
+
+exit 0
