@@ -157,6 +157,9 @@ button { cursor: pointer; font-family: var(--font); }
   font-size: 14px;
 }
 .new-chat:hover { background: var(--bg-bubble); }
+/* Выключена, когда открытый чат ещё пустой: создавать нечего. */
+.new-chat:disabled { opacity: 0.4; cursor: default; }
+.new-chat:disabled:hover { background: var(--bg-raised); }
 
 .chat-list { flex: 1; overflow-y: auto; padding: 0 8px; }
 .chat-group {

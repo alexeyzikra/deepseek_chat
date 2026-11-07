@@ -90,6 +90,19 @@ function groupOf(isoDate) {
 
 async function loadChats() {
   state.chats = await api(`/api/personas/${state.personaId}/chats`);
+  if (!state.chats.length) {
+    // В личности всегда должен быть открытый чат: зашёл — и пиши, без
+    // отдельного «новый чат». Поэтому пустую личность заводим сразу.
+    try {
+      const chat = await api(`/api/personas/${state.personaId}/chats`, {
+        method: "POST",
+      });
+      state.chatId = chat.id;
+      state.chats = await api(`/api/personas/${state.personaId}/chats`);
+    } catch (error) {
+      fail(error);
+    }
+  }
   renderChats();
   if (state.chats.length) {
     const stillThere = state.chats.some((c) => c.id === state.chatId);
@@ -731,6 +744,13 @@ function updateComposer() {
   $("send").disabled = state.busy || !hasChat || waitingForBot;
   $("append-user").disabled = state.busy || !hasChat || waitingForBot;
   $("input").disabled = !hasChat || waitingForBot;
+
+  // Второй пустой чат не нужен: если в открытом ещё ничего нет, создавать
+  // нечего — иначе от случайных нажатий копятся пустышки.
+  const empty = hasChat && !state.messages.length;
+  const newChat = $("new-chat");
+  newChat.disabled = empty || state.busy;
+  newChat.title = empty ? "Этот чат ещё пустой — пиши прямо в него" : "";
 
   const controls = $("tail-controls");
   controls.replaceChildren();
@@ -1408,6 +1428,7 @@ $("setup-create").onclick = async () => {
 };
 
 $("new-chat").onclick = async () => {
+  if (state.busy || (state.chatId && !state.messages.length)) return;
   try {
     const chat = await api(`/api/personas/${state.personaId}/chats`, { method: "POST" });
     state.chatId = chat.id;

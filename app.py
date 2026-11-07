@@ -240,6 +240,23 @@ def create_chat(persona_id: int):
         ).fetchone()
         if not persona:
             raise HTTPException(404, "Личность не найдена")
+        # Пустой чат уже есть — отдаём его, а не плодим второй. Кнопка в
+        # интерфейсе в этот момент выключена, но запрос всё равно может
+        # прийти — из второго окна или от двух нажатий подряд.
+        empty = conn.execute(
+            "SELECT id, number, title FROM chat "
+            "WHERE persona_id = ? AND deleted_at IS NULL "
+            "AND NOT EXISTS (SELECT 1 FROM message WHERE chat_id = chat.id) "
+            "ORDER BY id DESC LIMIT 1",
+            (persona_id,),
+        ).fetchone()
+        if empty:
+            return {
+                "id": empty["id"],
+                "number": empty["number"],
+                "title": empty["title"],
+                "reused": True,
+            }
         number = persona["next_chat_number"]
         conn.execute(
             "UPDATE persona SET next_chat_number = ? WHERE id = ?",
@@ -252,7 +269,7 @@ def create_chat(persona_id: int):
             (persona_id, number, title, persona["system_prompt"], db.now()),
         )
         chat_id = cur.lastrowid
-    return {"id": chat_id, "number": number, "title": title}
+    return {"id": chat_id, "number": number, "title": title, "reused": False}
 
 
 @app.get("/api/chats/{chat_id}")
