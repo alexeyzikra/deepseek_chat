@@ -194,7 +194,7 @@ async function openChat(id, keepScroll = false) {
   updateMeta(data.spent_millicents, data.context_tokens, data.context_limit);
   renderSystemPrompt();
   renderMessages();
-  if (!keepScroll) scrollDown(true);
+  if (!keepScroll) scrollDown();
 }
 
 function updateMeta(spent, tokens, limit) {
@@ -627,6 +627,9 @@ async function streamInto(url, payload, wrapper) {
   // Перерисовываем не чаще, чем раз в 120 мс, и обязательно в конце.
   let lastDraw = 0;
 
+  // Прокрутки здесь нет нарочно: текст уезжает вниз, экран стоит. Иначе
+  // читать невозможно — строки появляются быстрее, чем их читаешь.
+
   const response = await fetch(url, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -659,20 +662,17 @@ async function streamInto(url, payload, wrapper) {
         reasoningText += event.text;
         reasoning.classList.remove("hidden");
         reasoning.querySelector("div").textContent = reasoningText;
-        scrollDown(false);
       } else if (event.type === "content") {
         contentText += event.text;
         const now = Date.now();
         if (now - lastDraw > 120) {
           lastDraw = now;
           renderBody(body, contentText);
-          scrollDown(false);
         }
       } else if (event.type === "error") {
         throw new Error(event.message);
       } else if (event.type === "done") {
         renderBody(body, contentText);
-        scrollDown(false);
         return event;
       }
     }
@@ -688,7 +688,7 @@ async function runGeneration(url, payload, placeAfter) {
   const wrapper = pendingAssistantElement();
   if (placeAfter) placeAfter(wrapper);
   else $("messages").appendChild(wrapper);
-  scrollDown(true);
+  scrollDown();
 
   try {
     const done = await streamInto(url, payload, wrapper);
@@ -803,7 +803,7 @@ function draftAssistant() {
   $("messages").appendChild(draft);
   $("tail-controls").classList.add("hidden");
   editor.querySelector("textarea").focus();
-  scrollDown(true);
+  scrollDown();
 }
 
 async function appendUser() {
@@ -823,11 +823,10 @@ async function appendUser() {
   }
 }
 
-function scrollDown(force) {
+/** Зовётся только там, где прокрутка — ответ на действие человека. */
+function scrollDown() {
   const scroll = $("scroll");
-  const nearBottom =
-    scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight < 150;
-  if (force || nearBottom) scroll.scrollTop = scroll.scrollHeight;
+  scroll.scrollTop = scroll.scrollHeight;
 }
 
 /* ----------------------------------------------------------- настройки */
