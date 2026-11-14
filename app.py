@@ -1,6 +1,7 @@
 """Локальный веб-интерфейс к DeepSeek."""
 
 import json
+import re
 from collections.abc import Iterator
 
 from fastapi import FastAPI, HTTPException
@@ -635,6 +636,7 @@ def fork_from_message(message_id: int):
             "UPDATE persona SET next_chat_number = ? WHERE id = ?",
             (number + 1, persona["id"]),
         )
+        title = _fork_title(conn, persona["id"], source["title"], number)
         cur = conn.execute(
             "INSERT INTO chat (persona_id, number, title, system_prompt, "
             "forked_from_chat_id, forked_at_position, created_at) "
@@ -642,7 +644,7 @@ def fork_from_message(message_id: int):
             (
                 persona["id"],
                 number,
-                f"{number:02d}",
+                title,
                 source["system_prompt"],
                 source["id"],
                 message["position"],
@@ -661,7 +663,33 @@ def fork_from_message(message_id: int):
             "SELECT COUNT(*) AS c FROM message WHERE chat_id = ?", (new_id,)
         ).fetchone()["c"]
 
-    return {"id": new_id, "title": f"{number:02d}", "copied": copied}
+    return {"id": new_id, "title": title, "copied": copied}
+
+
+FORK_SUFFIX = re.compile(r"\s*\(форк(?:\s+\d+)?\)$")
+
+
+def _fork_title(conn, persona_id: int, source_title: str, number: int) -> str:
+    """«матан» → «матан (форк)», а форк форка — снова от «матан».
+
+    Номер остаётся в поле number и нужен для обезличенной строки в статистике,
+    но в заголовок больше не идёт: по названию видно, из чего ветка выросла.
+    Одинаковых автоимён не делаем — иначе в меню два «матан (форк)» подряд.
+    """
+    base = FORK_SUFFIX.sub("", source_title).strip() or f"{number:02d}"
+    taken = {
+        r["title"]
+        for r in conn.execute(
+            "SELECT title FROM chat WHERE persona_id = ? AND deleted_at IS NULL",
+            (persona_id,),
+        ).fetchall()
+    }
+    title = f"{base} (форк)"
+    n = 2
+    while title in taken:
+        title = f"{base} (форк {n})"
+        n += 1
+    return title
 
 
 @app.delete("/api/chats/{chat_id}")
