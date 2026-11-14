@@ -10,6 +10,7 @@ const state = {
   messages: [],
   busy: false,
   theme: "dark",
+  search: { query: "", results: [] },
 };
 
 const $ = (id) => document.getElementById(id);
@@ -120,6 +121,13 @@ async function loadChats() {
 }
 
 function renderChats() {
+  // Пока ищем, боковое меню показывает находки. Через ту же функцию, потому
+  // что openChat перерисовывает меню — иначе результаты пропадали бы от
+  // первого же перехода по ним.
+  if (state.search.query) {
+    renderSearchResults();
+    return;
+  }
   const list = $("chat-list");
   list.replaceChildren();
   let lastGroup = null;
@@ -174,6 +182,117 @@ function renderChats() {
     }
     addItem(chat);
   }
+}
+
+/* ------------------------------------------------------------- поиск */
+
+const SEARCH_MIN = 2;
+let searchTimer = null;
+
+function onSearchInput() {
+  const value = $("search").value.trim();
+  clearTimeout(searchTimer);
+  // Набирают быстрее, чем отвечает сервер. Ждём паузы, иначе запрос уходит
+  // на каждую букву, а ответы возвращаются не в том порядке.
+  searchTimer = setTimeout(() => runSearch(value).catch(fail), 180);
+}
+
+async function runSearch(query) {
+  if (query.length < SEARCH_MIN) {
+    state.search = { query: "", results: [] };
+    renderChats();
+    return;
+  }
+  const data = await api(
+    `/api/personas/${state.personaId}/search?q=${encodeURIComponent(query)}`
+  );
+  // Пока ходили на сервер, человек мог набрать дальше — ответ устарел.
+  if ($("search").value.trim() !== data.query) return;
+  state.search = { query: data.query, results: data.results };
+  renderChats();
+}
+
+function resetSearch() {
+  clearTimeout(searchTimer);
+  $("search").value = "";
+  state.search = { query: "", results: [] };
+}
+
+function renderSearchResults() {
+  const list = $("chat-list");
+  list.replaceChildren();
+  const results = state.search.results;
+
+  const header = document.createElement("div");
+  header.className = "chat-group";
+  header.textContent = results.length
+    ? `Нашлось чатов: ${results.length}`
+    : "Ничего не нашлось";
+  list.appendChild(header);
+
+  for (const result of results) {
+    const row = document.createElement("div");
+    row.className =
+      "chat-row" + (result.chat_id === state.chatId ? " active" : "");
+
+    const button = document.createElement("button");
+    button.className = "chat-item";
+    if (result.pinned) {
+      const pin = document.createElement("span");
+      pin.className = "pin";
+      pin.textContent = "📌";
+      button.appendChild(pin);
+    }
+    button.appendChild(document.createTextNode(result.title));
+    if (result.total) {
+      const count = document.createElement("span");
+      count.className = "hit-count";
+      count.textContent = result.total;
+      button.appendChild(count);
+    }
+    button.onclick = () => openChat(result.chat_id).catch(fail);
+
+    row.appendChild(button);
+    list.appendChild(row);
+    for (const hit of result.hits) list.appendChild(hitElement(result.chat_id, hit));
+  }
+}
+
+function hitElement(chatId, hit) {
+  const button = document.createElement("button");
+  button.className = "hit";
+
+  const who = document.createElement("span");
+  who.className = "hit-who";
+  who.textContent = hit.role === "user" ? "ты: " : "бот: ";
+  button.appendChild(who);
+
+  // Подсветка тремя узлами: до совпадения, совпадение, после. Текст чужой,
+  // поэтому только текстовые узлы — innerHTML здесь не бывает никогда.
+  const text = hit.text;
+  button.appendChild(document.createTextNode(text.slice(0, hit.start)));
+  if (hit.length) {
+    const mark = document.createElement("span");
+    mark.className = "hit-mark";
+    mark.textContent = text.slice(hit.start, hit.start + hit.length);
+    button.appendChild(mark);
+  }
+  button.appendChild(document.createTextNode(text.slice(hit.start + hit.length)));
+
+  button.onclick = () => openChatAt(chatId, hit.message_id).catch(fail);
+  return button;
+}
+
+/** Открыть чат и показать найденное сообщение, а не низ переписки. */
+async function openChatAt(chatId, messageId) {
+  if (chatId !== state.chatId) await openChat(chatId, true);
+  const element = $("messages").querySelector(`[data-id="${messageId}"]`);
+  if (!element) return;
+  element.scrollIntoView({ block: "center", behavior: "smooth" });
+  element.classList.remove("found");
+  void element.offsetWidth; // иначе вспышка не повторится при втором клике
+  element.classList.add("found");
+  setTimeout(() => element.classList.remove("found"), 2000);
 }
 
 async function openChat(id, keepScroll = false) {
@@ -1026,6 +1145,7 @@ async function removePersona(persona) {
       state.personas = fresh.personas;
       state.personaId = result.next_persona_id;
       state.chatId = null;
+      resetSearch();
       await loadPersona();
       await loadChats();
     } else {
@@ -1385,6 +1505,7 @@ function openPersonaMenu() {
       });
       state.personaId = persona.id;
       state.chatId = null;
+      resetSearch();
       await loadPersona();
       await loadChats();
     };
@@ -1469,6 +1590,7 @@ $("setup-create").onclick = async () => {
     state.personas = data.personas;
     state.personaId = created.id;
     state.chatId = null;
+    resetSearch();
     $("setup").classList.add("hidden");
     $("app").classList.remove("hidden");
     await loadPersona();
@@ -1481,6 +1603,7 @@ $("setup-create").onclick = async () => {
 
 $("new-chat").onclick = async () => {
   if (state.busy || (state.chatId && !state.messages.length)) return;
+  resetSearch();
   try {
     const chat = await api(`/api/personas/${state.personaId}/chats`, { method: "POST" });
     state.chatId = chat.id;
@@ -1510,6 +1633,15 @@ $("persona-button").onclick = openPersonaMenu;
 $("overlay").onclick = closeMenu;
 $("send").onclick = () => send().catch(fail);
 $("append-user").onclick = () => appendUser().catch(fail);
+
+$("search").addEventListener("input", onSearchInput);
+$("search").addEventListener("keydown", (event) => {
+  if (event.key === "Escape" && $("search").value) {
+    event.stopPropagation(); // не закрываем заодно модалку или меню
+    resetSearch();
+    renderChats();
+  }
+});
 
 $("input").addEventListener("input", resizeInput);
 $("input").addEventListener("keydown", (event) => {

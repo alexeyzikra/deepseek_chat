@@ -233,6 +233,99 @@ def list_chats(persona_id: int):
     return [dict(r) for r in rows]
 
 
+SEARCH_MIN = 2          # по одной букве искать бессмысленно
+SEARCH_MAX_CHATS = 40
+SEARCH_MAX_HITS = 3     # в боковом меню больше трёх строк на чат — каша
+SNIPPET_PAD = 60        # символов вокруг совпадения
+
+
+def _like_pattern(query: str) -> str:
+    """Экранируем служебные символы LIKE, иначе «100%» найдёт что угодно."""
+    escaped = query.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    return f"%{escaped.lower()}%"
+
+
+def _snippet(text: str, query: str) -> dict:
+    """Кусок вокруг совпадения плюс координаты, чтобы подсветить его в меню.
+
+    Переводы строк меняем на пробелы один к одному: длина сохраняется,
+    значит смещения остаются верными, а строка не рвётся посреди меню.
+    """
+    flat = text.replace("\n", " ").replace("\r", " ")
+    at = flat.lower().find(query.lower())
+    if at < 0:
+        return {"text": flat[: SNIPPET_PAD * 2], "start": 0, "length": 0}
+    start = max(0, at - SNIPPET_PAD)
+    end = min(len(flat), at + len(query) + SNIPPET_PAD)
+    head = "…" if start else ""
+    tail = "…" if end < len(flat) else ""
+    return {
+        "text": head + flat[start:end] + tail,
+        "start": at - start + len(head),
+        "length": len(query),
+    }
+
+
+@app.get("/api/personas/{persona_id}/search")
+def search_chats(persona_id: int, q: str = ""):
+    """Поиск по названиям и тексту сообщений внутри одной личности.
+
+    Только внутри: личности — изолированные пространства, и общий поиск
+    вытаскивал бы в чужое окно то, что туда не клали. Ищем простым LIKE,
+    без полнотекстового индекса: он потребовал бы менять схему базы, а
+    выигрыш на личной переписке в тысячи сообщений не заметен.
+
+    `lower` у SQLite умеет только латиницу, поэтому регистр снимаем своей
+    функцией — иначе «Матан» не нашёлся бы по «матан».
+    """
+    q = q.strip()
+    if len(q) < SEARCH_MIN:
+        return {"query": q, "results": []}
+    pattern = _like_pattern(q)
+
+    with db.session() as conn:
+        conn.create_function("lower_u", 1, lambda v: v.lower() if v else v)
+        rows = conn.execute(
+            "SELECT c.id AS chat_id, c.title, c.pinned, "
+            "m.id AS message_id, m.position, m.role, m.content "
+            "FROM chat c LEFT JOIN message m "
+            "  ON m.chat_id = c.id AND lower_u(m.content) LIKE ? ESCAPE '\\' "
+            "WHERE c.persona_id = ? AND c.deleted_at IS NULL "
+            "  AND (m.id IS NOT NULL OR lower_u(c.title) LIKE ? ESCAPE '\\') "
+            "ORDER BY c.pinned DESC, c.id DESC, m.position",
+            (pattern, persona_id, pattern),
+        ).fetchall()
+
+    found: dict[int, dict] = {}
+    for row in rows:
+        chat = found.get(row["chat_id"])
+        if chat is None:
+            if len(found) >= SEARCH_MAX_CHATS:
+                continue
+            chat = found[row["chat_id"]] = {
+                "chat_id": row["chat_id"],
+                "title": row["title"],
+                "pinned": bool(row["pinned"]),
+                "title_match": q.lower() in (row["title"] or "").lower(),
+                "total": 0,
+                "hits": [],
+            }
+        if row["message_id"] is None:
+            continue
+        chat["total"] += 1
+        if len(chat["hits"]) < SEARCH_MAX_HITS:
+            chat["hits"].append(
+                {
+                    "message_id": row["message_id"],
+                    "role": row["role"],
+                    "position": row["position"],
+                    **_snippet(row["content"], q),
+                }
+            )
+
+    return {"query": q, "results": list(found.values())}
+
+
 @app.post("/api/personas/{persona_id}/chats")
 def create_chat(persona_id: int):
     with db.session() as conn:
