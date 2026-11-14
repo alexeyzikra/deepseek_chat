@@ -2,10 +2,11 @@
 
 import json
 import re
+import urllib.parse
 from collections.abc import Iterator
 
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import FileResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -835,6 +836,193 @@ def clear_chats(persona_id: int):
 
 def _sse(payload: dict) -> str:
     return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+
+
+# ---------------------------------------------------------------- экспорт
+
+EXPORT_MEDIA = {
+    "md": "text/markdown; charset=utf-8",
+    "json": "application/json; charset=utf-8",
+}
+ROLE_TITLE = {"user": "Ты", "assistant": "Бот", "system": "Система"}
+
+
+def _day(stamp: str) -> str:
+    """ISO с секундами и зоной — в человеческое «2026-11-15 22:10»."""
+    return (stamp or "").replace("T", " ")[:16]
+
+
+def _quoted(text: str) -> str:
+    return "\n".join("> " + line if line else ">" for line in text.splitlines())
+
+
+def _collect(conn, persona, chat_rows: list) -> dict:
+    """Всё, что знает база о выбранных чатах, одним словарём."""
+    chats = []
+    for chat in chat_rows:
+        messages = conn.execute(
+            "SELECT id, position, role, content, reasoning_content, created_at "
+            "FROM message WHERE chat_id = ? ORDER BY position",
+            (chat["id"],),
+        ).fetchall()
+        costs = {
+            r["message_id"]: r["cost_usd"]
+            for r in conn.execute(
+                "SELECT message_id, cost_usd FROM api_call "
+                "WHERE chat_id = ? AND message_id IS NOT NULL",
+                (chat["id"],),
+            )
+        }
+        source = None
+        if chat["forked_from_chat_id"]:
+            row = conn.execute(
+                "SELECT title FROM chat WHERE id = ?", (chat["forked_from_chat_id"],)
+            ).fetchone()
+            source = row["title"] if row else None
+        chats.append(
+            {
+                "title": chat["title"],
+                "number": chat["number"],
+                "created_at": chat["created_at"],
+                "pinned": bool(chat["pinned"]),
+                "system_prompt": chat["system_prompt"],
+                "forked_from": source,
+                "forked_at_position": chat["forked_at_position"],
+                "messages": [
+                    {
+                        "position": m["position"],
+                        "role": m["role"],
+                        "content": m["content"],
+                        "reasoning_content": m["reasoning_content"],
+                        "created_at": m["created_at"],
+                        "cost_millicents": (
+                            pricing.to_millicents(costs[m["id"]])
+                            if costs.get(m["id"])
+                            else None
+                        ),
+                    }
+                    for m in messages
+                ],
+            }
+        )
+    return {
+        "app": "deepseek_chat",
+        "format": 1,
+        "exported_at": db.now(),
+        "persona": {
+            "name": persona["name"],
+            "system_prompt": persona["system_prompt"],
+            "thinking_enabled": bool(persona["thinking_enabled"]),
+        },
+        "chats": chats,
+    }
+
+
+def _markdown(payload: dict, single: bool) -> str:
+    """Переписка так, как её читают. Размышления и цены остаются в JSON."""
+    persona = payload["persona"]
+    chats = payload["chats"]
+    out: list[str] = []
+
+    if single and chats:
+        chat = chats[0]
+        out += [
+            f"# {chat['title']}",
+            "",
+            f"Личность «{persona['name']}» · создан {_day(chat['created_at'])}"
+            f" · выгружено {_day(payload['exported_at'])}",
+            "",
+        ]
+    else:
+        out += [
+            f"# Личность «{persona['name']}»",
+            "",
+            f"Чатов: {len(chats)} · выгружено {_day(payload['exported_at'])}",
+            "",
+        ]
+
+    for chat in chats:
+        if not single:
+            out += ["---", "", f"## {chat['title']}", ""]
+        if chat["forked_from"]:
+            out += [f"Форк из «{chat['forked_from']}».", ""]
+        prompt = (chat["system_prompt"] or "").strip()
+        if prompt:
+            out += ["**Системный промпт**", "", _quoted(prompt), ""]
+        for message in chat["messages"]:
+            who = ROLE_TITLE.get(message["role"], message["role"])
+            out += [f"**{who}**", "", (message["content"] or "").strip(), ""]
+
+    out += [
+        "---",
+        "",
+        "Выгружено из локального DeepSeek Chat. Размышления модели и цены",
+        "в этот формат не попадают — они есть в выгрузке JSON.",
+        "",
+    ]
+    return "\n".join(out)
+
+
+def _attachment(text: str, name: str, fmt: str) -> Response:
+    """Имя файла отдаём дважды: латиницей и по RFC 5987, с кириллицей."""
+    stem = re.sub(r"[^\w .-]+", "", name, flags=re.UNICODE).strip() or "export"
+    filename = f"{stem} {_day(db.now())[:10]}.{fmt}"
+    # Кириллица из запасного имени выпадает целиком, и остаётся одна дата —
+    # поэтому подставляем осмысленное имя: это имя видят только браузеры,
+    # не понимающие filename*, современные берут полное.
+    fallback = re.sub(r"[^A-Za-z0-9._-]+", "-", filename).strip("-")
+    if not fallback or fallback[0].isdigit():
+        fallback = f"deepseek-chat-{fallback}" if fallback else f"export.{fmt}"
+    return Response(
+        content=text.encode("utf-8"),
+        media_type=EXPORT_MEDIA[fmt],
+        headers={
+            "Content-Disposition": (
+                f'attachment; filename="{fallback}"; '
+                f"filename*=UTF-8''{urllib.parse.quote(filename)}"
+            )
+        },
+    )
+
+
+def _export(conn, persona, chat_rows, fmt: str, single: bool) -> Response:
+    payload = _collect(conn, persona, chat_rows)
+    if fmt == "json":
+        text = json.dumps(payload, ensure_ascii=False, indent=2)
+    else:
+        text = _markdown(payload, single)
+    name = payload["chats"][0]["title"] if single else f"Личность {persona['name']}"
+    return _attachment(text, name, fmt)
+
+
+@app.get("/api/chats/{chat_id}/export")
+def export_chat(chat_id: int, fmt: str = "md"):
+    if fmt not in EXPORT_MEDIA:
+        raise HTTPException(400, "Формат бывает md или json")
+    with db.session() as conn:
+        chat = _chat_or_404(conn, chat_id)
+        persona = conn.execute(
+            "SELECT * FROM persona WHERE id = ?", (chat["persona_id"],)
+        ).fetchone()
+        return _export(conn, persona, [chat], fmt, single=True)
+
+
+@app.get("/api/personas/{persona_id}/export")
+def export_persona(persona_id: int, fmt: str = "md"):
+    if fmt not in EXPORT_MEDIA:
+        raise HTTPException(400, "Формат бывает md или json")
+    with db.session() as conn:
+        persona = conn.execute(
+            "SELECT * FROM persona WHERE id = ? AND deleted_at IS NULL", (persona_id,)
+        ).fetchone()
+        if not persona:
+            raise HTTPException(404, "Личность не найдена")
+        chats = conn.execute(
+            "SELECT * FROM chat WHERE persona_id = ? AND deleted_at IS NULL "
+            "ORDER BY pinned DESC, id",
+            (persona_id,),
+        ).fetchall()
+        return _export(conn, persona, chats, fmt, single=False)
 
 
 # ------------------------------------------------------------ статистика

@@ -1181,6 +1181,72 @@ const CATEGORY = {
   output: "Выход",
 };
 
+/* ----------------------------------------------------------- экспорт */
+
+/** Скачивание запускает сам браузер: имя файла приходит в заголовке ответа. */
+function download(url) {
+  const link = document.createElement("a");
+  link.href = url;
+  link.rel = "noopener";
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+}
+
+/** target: {kind: "chat" | "persona", id, name} */
+function openExport(target) {
+  const chat = target.kind === "chat";
+  $("modal-title").textContent = "Экспорт";
+  const body = $("modal-body");
+  body.replaceChildren();
+
+  const what = document.createElement("div");
+  what.className = "stat-sub";
+  what.textContent = chat
+    ? `Чат «${target.name}» одним файлом.`
+    : `Все чаты личности «${target.name}» одним файлом.`;
+  body.appendChild(what);
+
+  const options = [
+    [
+      "md",
+      "Markdown",
+      "Переписка так, как её читают: системный промпт и сообщения. " +
+        "Размышления модели и цены сюда не попадают.",
+    ],
+    [
+      "json",
+      "JSON",
+      "Всё, что знает база: размышления, цены, даты, номера позиций. " +
+        "Для переноса и разбора программой.",
+    ],
+  ];
+  for (const [fmt, label, hint] of options) {
+    const block = document.createElement("div");
+    block.className = "export-option";
+    const button = document.createElement("button");
+    button.className = "primary";
+    button.textContent = label;
+    button.onclick = () => {
+      const base = chat ? "chats" : "personas";
+      download(`/api/${base}/${target.id}/export?fmt=${fmt}`);
+      closeModal();
+    };
+    block.append(button, note(hint));
+    body.appendChild(block);
+  }
+
+  body.appendChild(
+    note(
+      "Дальше файл живёт сам по себе: это обычный текст на диске, вне базы. " +
+        "Удаление чата его не трогает, а стирание такого файла — не то же " +
+        "самое, что безвозвратное удаление здесь."
+    )
+  );
+
+  $("modal").classList.remove("hidden");
+}
+
 function closeModal() {
   $("modal").classList.add("hidden");
 }
@@ -1416,6 +1482,7 @@ function openChatMenu(chat, anchor) {
   item("Переименовать", () => startRename(chat));
   item(chat.pinned ? "Открепить" : "Закрепить", () => togglePin(chat));
   item("Статистика", () => showStats(`/api/stats/chat/${chat.id}`));
+  item("Экспорт", () => openExport({ kind: "chat", id: chat.id, name: chat.title }));
 
   const separator = document.createElement("div");
   separator.className = "sep";
@@ -1556,6 +1623,19 @@ function openPersonaMenu() {
     showStats("/api/stats/all");
   };
   menu.appendChild(allStats);
+
+  const exportAll = document.createElement("button");
+  exportAll.textContent = "Экспорт всех чатов";
+  exportAll.onclick = () => {
+    closeMenu();
+    openExport({
+      kind: "persona",
+      id: state.personaId,
+      name: state.persona.name,
+    });
+  };
+  menu.appendChild(exportAll);
+
 
   const separator2 = document.createElement("div");
   separator2.className = "sep";

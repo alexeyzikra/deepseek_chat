@@ -709,6 +709,10 @@ table.stat tr.sub td { color: var(--text-dim); font-size: 13px; border-top: none
 /* Вторая кнопка идёт следом за пояснением к первой — нужен воздух. */
 .danger-zone .note + button { margin-top: 16px; }
 
+.export-option { margin-bottom: 18px; }
+.export-option button { width: auto; padding: 9px 20px; margin: 0; }
+.export-option .note { margin-top: 6px; }
+
 .saved-note { color: var(--accent); font-size: 13px; margin-left: 12px; }
 
 /* На узком окне широкие поля только мешают */
