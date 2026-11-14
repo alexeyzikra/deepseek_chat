@@ -234,6 +234,7 @@ function renderSearchResults() {
     const row = document.createElement("div");
     row.className =
       "chat-row" + (result.chat_id === state.chatId ? " active" : "");
+    row.dataset.id = result.chat_id;
 
     const button = document.createElement("button");
     button.className = "chat-item";
@@ -252,7 +253,23 @@ function renderSearchResults() {
     }
     button.onclick = () => openChat(result.chat_id).catch(fail);
 
-    row.appendChild(button);
+    // Меню тут то же самое: нашёл чат — сразу переименуй, закрепи или удали,
+    // не выходя из поиска.
+    const chat = {
+      id: result.chat_id,
+      title: result.title,
+      pinned: result.pinned,
+    };
+    const more = document.createElement("button");
+    more.className = "chat-more";
+    more.textContent = "⋯";
+    more.title = "Действия с чатом";
+    more.onclick = (event) => {
+      event.stopPropagation();
+      openChatMenu(chat, more);
+    };
+
+    row.append(button, more);
     list.appendChild(row);
     for (const hit of result.hits) list.appendChild(hitElement(result.chat_id, hit));
   }
