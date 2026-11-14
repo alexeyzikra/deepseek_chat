@@ -406,14 +406,14 @@ button { cursor: pointer; font-family: var(--font); }
 
 /* ------------------------------------------------- действия и правка */
 
+/* Видны всегда, а не по наведению: правка истории здесь основное занятие,
+   и прятать её инструменты значит прятать главное. Приглушённый цвет и мелкий
+   кегль делают ленту спокойной и без этого. */
 .actions {
   display: flex;
   gap: 2px;
   margin-top: 6px;
-  opacity: 0;
-  transition: opacity .12s;
 }
-.msg:hover .actions, .actions:focus-within { opacity: 1; }
 .msg-user .actions { justify-content: flex-end; }
 
 .action {
