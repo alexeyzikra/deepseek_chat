@@ -654,6 +654,8 @@ table.stat tr.sub td { color: var(--text-dim); font-size: 13px; border-top: none
   font-size: 14px;
 }
 .danger-zone button:hover { background: var(--danger); color: #fff; }
+/* Вторая кнопка идёт следом за пояснением к первой — нужен воздух. */
+.danger-zone .note + button { margin-top: 16px; }
 
 .saved-note { color: var(--accent); font-size: 13px; margin-left: 12px; }
 

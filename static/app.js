@@ -965,6 +965,16 @@ function openSettings() {
   // --- удаление личности --------------------------------------------------
   const zone = document.createElement("div");
   zone.className = "danger-zone";
+  const clear = document.createElement("button");
+  clear.textContent = "Очистить все чаты";
+  clear.onclick = () => clearChats(persona);
+  zone.append(
+    clear,
+    note(
+      "Сотрёт переписку во всех чатах этой личности. Сама личность, её " +
+        "промпт, нумерация и статистика останутся на месте."
+    )
+  );
   const remove = document.createElement("button");
   remove.textContent = "Удалить личность";
   remove.onclick = () => removePersona(persona);
@@ -979,6 +989,27 @@ function openSettings() {
   body.appendChild(zone);
 
   $("modal").classList.remove("hidden");
+}
+
+async function clearChats(persona) {
+  const count = state.chats.length;
+  if (!count) {
+    alert("В этой личности и так нет чатов.");
+    return;
+  }
+  const question =
+    `Удалить все чаты личности «${persona.name}»?\n\n` +
+    `Их сейчас ${count}. Переписка стирается без возможности восстановления.\n` +
+    "Личность, её промпт и статистика расходов останутся.";
+  if (!confirm(question)) return;
+  try {
+    await api(`/api/personas/${persona.id}/chats`, { method: "DELETE" });
+    closeModal();
+    state.chatId = null;
+    await loadChats();
+  } catch (error) {
+    fail(error);
+  }
 }
 
 async function removePersona(persona) {

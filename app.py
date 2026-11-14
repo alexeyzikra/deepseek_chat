@@ -700,15 +700,44 @@ def delete_chat(chat_id: int):
     не выпали из статистики. Журнал вызовов не трогаем никогда.
     """
     with db.session() as conn:
-        chat = _chat_or_404(conn, chat_id)
-        conn.execute("DELETE FROM message WHERE chat_id = ?", (chat_id,))
-        conn.execute(
-            "UPDATE chat SET deleted_at = ?, system_prompt = '', title = ? "
-            "WHERE id = ?",
-            (db.now(), f"Удалённый чат №{chat['number']:02d}", chat_id),
-        )
+        _wipe_chat(conn, _chat_or_404(conn, chat_id))
     db.vacuum()
     return {"ok": True}
+
+
+def _wipe_chat(conn, chat) -> None:
+    """Сообщения и промпт стираются, остаётся обезличенная строка с номером."""
+    conn.execute("DELETE FROM message WHERE chat_id = ?", (chat["id"],))
+    conn.execute(
+        "UPDATE chat SET deleted_at = ?, system_prompt = '', title = ? "
+        "WHERE id = ?",
+        (db.now(), f"Удалённый чат №{chat['number']:02d}", chat["id"]),
+    )
+
+
+@app.delete("/api/personas/{persona_id}/chats")
+def clear_chats(persona_id: int):
+    """Все чаты личности безвозвратно, но сама личность остаётся.
+
+    Имя, системный промпт, нумерация и статистика не трогаются: расходы
+    живут в отдельном журнале, из которого не удаляется ничего.
+    """
+    with db.session() as conn:
+        persona = conn.execute(
+            "SELECT id FROM persona WHERE id = ? AND deleted_at IS NULL",
+            (persona_id,),
+        ).fetchone()
+        if not persona:
+            raise HTTPException(404, "Личность не найдена")
+        chats = conn.execute(
+            "SELECT id, number FROM chat "
+            "WHERE persona_id = ? AND deleted_at IS NULL",
+            (persona_id,),
+        ).fetchall()
+        for chat in chats:
+            _wipe_chat(conn, chat)
+    db.vacuum()
+    return {"cleared": len(chats)}
 
 
 def _sse(payload: dict) -> str:
