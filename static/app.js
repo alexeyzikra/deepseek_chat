@@ -1084,6 +1084,23 @@ function statTable(headers) {
   return table;
 }
 
+const num = (n) => n.toLocaleString("ru");
+const pct = (share) => (share >= 1 || share === 0 ? share.toFixed(0) : "<1") + "%";
+
+/** Строка таблицы: название с полосой под ним и числа справа. */
+function barRow(label, share, barClass, values) {
+  const name = document.createElement("td");
+  name.appendChild(document.createTextNode(label));
+  const bar = document.createElement("div");
+  bar.className = barClass;
+  bar.style.width = Math.max(share, 0.5) + "%";
+  name.appendChild(bar);
+
+  const tr = document.createElement("tr");
+  tr.append(name, ...values.map((v) => cell(v, true)));
+  return tr;
+}
+
 function renderStats(data, withBalance) {
   $("modal-title").textContent = data.title;
   const body = $("modal-body");
@@ -1111,41 +1128,46 @@ function renderStats(data, withBalance) {
   }
 
   // --- на что ушли деньги -------------------------------------------
+  // Две таблицы, а не две полосы в одной строке: доля денег и доля токенов —
+  // разные величины, и мерить их одной полосой значило бы врать. Сравнение,
+  // которое нужно, идёт по вертикали внутри каждой таблицы.
   body.appendChild(sectionTitle("На что ушли деньги"));
-  const table = statTable(["", "токенов", "цена", "доля"]);
+  const money = statTable(["", "цена", "доля"]);
   for (const key of ["cache_hit", "cache_miss", "output"]) {
     const cost = data.cost[key];
     const share = data.total ? (cost / data.total) * 100 : 0;
-
-    const name = document.createElement("td");
-    name.appendChild(document.createTextNode(CATEGORY[key]));
-    const bar = document.createElement("div");
-    bar.className = "bar";
-    bar.style.width = Math.max(share, 0.5) + "%";
-    name.appendChild(bar);
-
-    const tr = document.createElement("tr");
-    tr.append(
-      name,
-      cell(data.tokens[key].toLocaleString("ru"), true),
-      cell(formatCost(cost), true),
-      cell(share.toFixed(0) + "%", true)
+    money.appendChild(
+      barRow(CATEGORY[key], share, "bar", [formatCost(cost), pct(share)])
     );
-    table.appendChild(tr);
+  }
+  body.appendChild(money);
+
+  // --- сколько это было токенов -------------------------------------
+  // reasoning внутри output, поэтому в сумму не идёт: это подстрока выхода.
+  const allTokens =
+    data.tokens.cache_hit + data.tokens.cache_miss + data.tokens.output;
+  body.appendChild(sectionTitle("Сколько это было токенов"));
+  const counts = statTable(["", "токенов", "доля"]);
+  for (const key of ["cache_hit", "cache_miss", "output"]) {
+    const n = data.tokens[key];
+    const share = allTokens ? (n / allTokens) * 100 : 0;
+    counts.appendChild(
+      barRow(CATEGORY[key], share, "bar tokens", [num(n), pct(share)])
+    );
 
     if (key === "output" && data.tokens.reasoning) {
+      const r = data.tokens.reasoning;
       const note = document.createElement("tr");
       note.className = "sub";
       note.append(
         cell("из них размышление"),
-        cell(data.tokens.reasoning.toLocaleString("ru"), true),
-        cell("", true),
-        cell("", true)
+        cell(num(r), true),
+        cell(allTokens ? pct((r / allTokens) * 100) : "", true)
       );
-      table.appendChild(note);
+      counts.appendChild(note);
     }
   }
-  body.appendChild(table);
+  body.appendChild(counts);
 
   // --- тариф ----------------------------------------------------------
   const peak = data.by_tariff.peak || 0;

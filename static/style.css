@@ -8,6 +8,10 @@
   --text-dim: #9aa0a6;
   --accent: #4d6bfe;
   --accent-text: #ffffff;
+  /* Полосы токенов. Отдельный цвет, чтобы таблицу денег и таблицу токенов
+     нельзя было перепутать; проверен на различимость с --accent, включая
+     дальтонизм, и на контраст с фоном в обеих темах. */
+  --tokens: #c2781c;
   --danger: #e5534b;
   --overlay: rgba(0, 0, 0, .55);
   --shadow: 0 10px 30px rgba(0, 0, 0, .45);
@@ -575,6 +579,7 @@ table.stat tr.sub td { color: var(--text-dim); font-size: 13px; border-top: none
   margin-top: 5px;
   min-width: 2px;
 }
+.bar.tokens { background: var(--tokens); }
 
 .balance-line {
   margin-top: 22px;
