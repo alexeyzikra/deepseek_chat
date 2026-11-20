@@ -709,6 +709,21 @@ table.stat tr.sub td { color: var(--text-dim); font-size: 13px; border-top: none
 /* Вторая кнопка идёт следом за пояснением к первой — нужен воздух. */
 .danger-zone .note + button { margin-top: 16px; }
 
+.lock-mark { margin-left: 8px; font-size: 12px; opacity: .8; }
+.lock-buttons { display: flex; gap: 10px; margin-top: 10px; }
+.lock-buttons button {
+  width: auto;
+  margin: 0;
+  padding: 9px 18px;
+  border: 1px solid var(--border);
+  background: none;
+  color: var(--text);
+  border-radius: 10px;
+  font-size: 14px;
+}
+.lock-buttons button.primary { border-color: transparent; }
+.lock-buttons button:not(.primary):hover { background: var(--bg-raised); }
+
 .export-option { margin-bottom: 18px; }
 .export-option button { width: auto; padding: 9px 20px; margin: 0; }
 .export-option .note { margin-top: 6px; }

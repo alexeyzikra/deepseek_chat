@@ -24,7 +24,11 @@ CREATE TABLE IF NOT EXISTS persona (
     thinking_enabled INTEGER NOT NULL DEFAULT 0,
     next_chat_number INTEGER NOT NULL DEFAULT 1,
     created_at       TEXT    NOT NULL,
-    deleted_at       TEXT
+    deleted_at       TEXT,
+    -- Пароль хранится только хешем: содержимое он не шифрует, но сам пароль
+    -- человек мог взять тот же, что и где-то ещё.
+    password_hash    TEXT,
+    hidden           INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS chat (
@@ -107,9 +111,31 @@ def session():
         conn.close()
 
 
+# Столбцы, появившиеся после первых версий. Добавляются на месте: ALTER TABLE
+# ADD COLUMN не переписывает существующие строки и не читает их содержимое.
+MIGRATIONS = (
+    ("persona", "password_hash", "TEXT"),
+    ("persona", "hidden", "INTEGER NOT NULL DEFAULT 0"),
+)
+
+
 def init() -> None:
     with session() as conn:
         conn.executescript(SCHEMA)
+        migrate(conn)
+
+
+def migrate(conn) -> list[str]:
+    """Доводит старую базу до текущей схемы. Возвращает, что добавилось."""
+    added = []
+    for table, column, decl in MIGRATIONS:
+        columns = {
+            r["name"] for r in conn.execute(f"PRAGMA table_info({table})").fetchall()
+        }
+        if column not in columns:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
+            added.append(f"{table}.{column}")
+    return added
 
 
 def vacuum() -> None:

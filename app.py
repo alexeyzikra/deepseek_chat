@@ -2,23 +2,103 @@
 
 import json
 import re
+import time
 import urllib.parse
 from collections.abc import Iterator
 
-from fastapi import FastAPI, HTTPException
-from fastapi.responses import FileResponse, Response, StreamingResponse
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import (
+    FileResponse,
+    JSONResponse,
+    Response,
+    StreamingResponse,
+)
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 import config
 import db
 import deepseek_client
+import passwords
 import pricing
 
 app = FastAPI(title="DeepSeek Chat")
 db.init()
 
 CURRENT_PERSONA = "current_persona_id"
+
+# Личности, открытые паролем в этом запуске. Живёт только в памяти: закрыл
+# приложение — заперто снова. Это замок на интерфейсе, а не шифрование:
+# тот, кто откроет сам chats.db, прочитает всё и без пароля. Так решено
+# сознательно, и об этом сказано и в окне настроек, и в README.
+UNLOCKED: set[int] = set()
+
+
+def _is_locked(persona_id: int) -> bool:
+    if persona_id in UNLOCKED:
+        return False
+    with db.session() as conn:
+        row = conn.execute(
+            "SELECT password_hash FROM persona WHERE id = ?", (persona_id,)
+        ).fetchone()
+    return bool(row and row["password_hash"])
+
+
+def _persona_of_chat(chat_id: int) -> int | None:
+    with db.session() as conn:
+        row = conn.execute(
+            "SELECT persona_id FROM chat WHERE id = ?", (chat_id,)
+        ).fetchone()
+    return row["persona_id"] if row else None
+
+
+def _persona_of_message(message_id: int) -> int | None:
+    with db.session() as conn:
+        row = conn.execute(
+            "SELECT c.persona_id FROM message m JOIN chat c ON c.id = m.chat_id "
+            "WHERE m.id = ?",
+            (message_id,),
+        ).fetchone()
+    return row["persona_id"] if row else None
+
+
+def _persona_for_path(path: str) -> int | None:
+    """Чью личность трогает этот адрес. None — проверять нечего."""
+    parts = path.strip("/").split("/")
+    if len(parts) < 3 or parts[0] != "api":
+        return None
+    kind, ident = parts[1], parts[2]
+    tail = parts[3] if len(parts) > 3 else ""
+    if kind == "stats":  # /api/stats/chat/5 — то же самое, но на шаг глубже
+        if len(parts) < 4:
+            return None
+        kind, ident, tail = parts[2] + "s", parts[3], ""
+    if not ident.isdigit():
+        return None
+    ident = int(ident)
+    if kind == "personas":
+        return None if tail == "unlock" else ident
+    if kind == "chats":
+        return _persona_of_chat(ident)
+    if kind == "messages":
+        return _persona_of_message(ident)
+    return None
+
+
+@app.middleware("http")
+async def lock_guard(request: Request, call_next):
+    """Запертую личность не отдаём никому — ни одному маршруту.
+
+    Проверка здесь, а не в каждом обработчике: маршрутов два десятка, и
+    забытый обработчик означал бы, что чат запертой личности открывается
+    по прямой ссылке.
+    """
+    persona_id = _persona_for_path(request.url.path)
+    if persona_id is not None and _is_locked(persona_id):
+        return JSONResponse(
+            {"detail": "Личность заперта паролем"}, status_code=423
+        )
+    return await call_next(request)
 
 
 # ---------------------------------------------------------------- модели тела
@@ -64,11 +144,19 @@ class ChatPatchIn(BaseModel):
 def bootstrap():
     with db.session() as conn:
         personas = [
-            dict(r)
+            {
+                "id": r["id"],
+                "name": r["name"],
+                "thinking_enabled": r["thinking_enabled"],
+                "locked": bool(r["password_hash"]) and r["id"] not in UNLOCKED,
+            }
             for r in conn.execute(
-                "SELECT id, name, thinking_enabled FROM persona "
-                "WHERE deleted_at IS NULL ORDER BY id"
+                "SELECT id, name, thinking_enabled, password_hash, hidden "
+                "FROM persona WHERE deleted_at IS NULL ORDER BY id"
             )
+            # Скрытая личность не упоминается вообще: ни строкой, ни числом.
+            # Иначе по одному её присутствию было бы видно, что она есть.
+            if not r["hidden"] or r["id"] in UNLOCKED
         ]
         current = db.get_state(conn, CURRENT_PERSONA)
         current_id = int(current) if current else None
@@ -78,9 +166,11 @@ def bootstrap():
             current_id = personas[0]["id"]
             db.set_state(conn, CURRENT_PERSONA, str(current_id))
         theme = db.get_state(conn, "theme") or "dark"
+    current = next((p for p in personas if p["id"] == current_id), None)
     return {
         "personas": personas,
         "current_persona_id": current_id,
+        "current_locked": bool(current and current["locked"]),
         "theme": theme,
     }
 
@@ -101,6 +191,109 @@ def create_persona(body: PersonaIn):
     return {"id": persona_id}
 
 
+class PasswordIn(BaseModel):
+    password: str = ""
+
+
+class PasswordSetIn(BaseModel):
+    password: str | None = None  # пусто или None — снять пароль
+    hidden: bool | None = None
+
+
+WRONG_PASSWORD_DELAY = 0.5  # не защита, а помеха перебору вслепую
+
+
+@app.post("/api/personas/{persona_id}/unlock")
+def unlock_persona(persona_id: int, body: PasswordIn):
+    with db.session() as conn:
+        row = conn.execute(
+            "SELECT password_hash FROM persona WHERE id = ? AND deleted_at IS NULL",
+            (persona_id,),
+        ).fetchone()
+    if not row or not passwords.check_password(body.password, row["password_hash"]):
+        time.sleep(WRONG_PASSWORD_DELAY)
+        raise HTTPException(403, "Пароль не подошёл")
+    UNLOCKED.add(persona_id)
+    return {"ok": True}
+
+
+@app.post("/api/unlock-hidden")
+def unlock_hidden(body: PasswordIn):
+    """Вход в скрытую личность — по одному паролю, без имени.
+
+    Имя спрашивать нельзя: пришлось бы либо показывать список скрытых, либо
+    отвечать «такой нет», а это уже ответ на вопрос, есть ли она. Ответ
+    здесь один и тот же и когда пароль неверный, и когда скрытых нет вовсе.
+    """
+    with db.session() as conn:
+        rows = conn.execute(
+            "SELECT id, name, password_hash FROM persona "
+            "WHERE hidden = 1 AND deleted_at IS NULL"
+        ).fetchall()
+    for row in rows:
+        if passwords.check_password(body.password, row["password_hash"]):
+            UNLOCKED.add(row["id"])
+            return {"persona_id": row["id"], "name": row["name"]}
+    time.sleep(WRONG_PASSWORD_DELAY)
+    raise HTTPException(403, "Ничего не открылось")
+
+
+@app.post("/api/personas/{persona_id}/lock")
+def lock_persona(persona_id: int):
+    """Запереть обратно, не перезапуская приложение."""
+    UNLOCKED.discard(persona_id)
+    return {"ok": True}
+
+
+@app.post("/api/personas/{persona_id}/password")
+def set_password(persona_id: int, body: PasswordSetIn):
+    """Поставить, сменить или снять пароль, и заодно скрытие.
+
+    Скрытие без пароля запрещено: в переключателе такой личности нет, а
+    открыть её нечем — она пропала бы насовсем.
+    """
+    with db.session() as conn:
+        row = conn.execute(
+            "SELECT password_hash, hidden FROM persona "
+            "WHERE id = ? AND deleted_at IS NULL",
+            (persona_id,),
+        ).fetchone()
+        if not row:
+            raise HTTPException(404, "Личность не найдена")
+
+        has_password = bool(row["password_hash"])
+        hidden = bool(row["hidden"])
+        if body.password is not None:
+            password = body.password.strip()
+            if password:
+                conn.execute(
+                    "UPDATE persona SET password_hash = ? WHERE id = ?",
+                    (passwords.hash_password(password), persona_id),
+                )
+                has_password = True
+                UNLOCKED.add(persona_id)  # кто поставил, тот уже внутри
+            else:
+                conn.execute(
+                    "UPDATE persona SET password_hash = NULL, hidden = 0 "
+                    "WHERE id = ?",
+                    (persona_id,),
+                )
+                has_password = False
+                hidden = False
+
+        if body.hidden is not None:
+            hidden = bool(body.hidden)
+            if hidden and not has_password:
+                raise HTTPException(
+                    400, "Скрывать можно только личность с паролем — иначе её не открыть"
+                )
+            conn.execute(
+                "UPDATE persona SET hidden = ? WHERE id = ?", (int(hidden), persona_id)
+            )
+
+    return {"has_password": has_password, "hidden": hidden}
+
+
 @app.post("/api/current-persona")
 def set_current_persona(body: CurrentPersonaIn):
     with db.session() as conn:
@@ -118,13 +311,21 @@ def set_current_persona(body: CurrentPersonaIn):
 def get_persona(persona_id: int):
     with db.session() as conn:
         row = conn.execute(
-            "SELECT id, name, system_prompt, thinking_enabled FROM persona "
-            "WHERE id = ? AND deleted_at IS NULL",
+            "SELECT id, name, system_prompt, thinking_enabled, password_hash, hidden "
+            "FROM persona WHERE id = ? AND deleted_at IS NULL",
             (persona_id,),
         ).fetchone()
     if not row:
         raise HTTPException(404, "Личность не найдена")
-    return dict(row)
+    # Хеш наружу не отдаём никогда — интерфейсу достаточно знать, что пароль есть.
+    return {
+        "id": row["id"],
+        "name": row["name"],
+        "system_prompt": row["system_prompt"],
+        "thinking_enabled": row["thinking_enabled"],
+        "has_password": bool(row["password_hash"]),
+        "hidden": bool(row["hidden"]),
+    }
 
 
 @app.patch("/api/personas/{persona_id}")
@@ -1135,12 +1336,26 @@ def stats_persona(persona_id: int):
 @app.get("/api/stats/all")
 def stats_all():
     with db.session() as conn:
-        rows = conn.execute(CALL_COLUMNS).fetchall()
+        # Скрытые личности не упоминаются и здесь: строка «кто-то потратил
+        # 500 мц» — это ответ на вопрос, есть ли они. Пока такая личность
+        # заперта, её вызовы выпадают и из разбивки, и из общей суммы.
+        hidden_ids = [
+            r["id"]
+            for r in conn.execute("SELECT id FROM persona WHERE hidden = 1")
+            if r["id"] not in UNLOCKED
+        ]
+        skip = ""
+        if hidden_ids:
+            skip = " WHERE persona_id NOT IN (%s)" % ",".join(
+                str(i) for i in hidden_ids
+            )
+        rows = conn.execute(CALL_COLUMNS + skip).fetchall()
         per_persona = conn.execute(
             "SELECT c.persona_id, COALESCE(p.name, 'Удалённая личность') AS name, "
             "COUNT(*) AS calls, SUM(c.cost_usd) AS cost "
             "FROM api_call c LEFT JOIN persona p ON p.id = c.persona_id "
-            "GROUP BY c.persona_id ORDER BY cost DESC"
+            + (skip.replace("persona_id", "c.persona_id") if skip else "")
+            + " GROUP BY c.persona_id ORDER BY cost DESC"
         ).fetchall()
         first = conn.execute(
             "SELECT created_at FROM api_call ORDER BY id LIMIT 1"

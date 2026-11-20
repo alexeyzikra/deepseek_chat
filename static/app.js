@@ -48,6 +48,21 @@ async function boot() {
     return;
   }
   $("app").classList.remove("hidden");
+
+  // Запертая личность не открывается молча. Позади показываем первую
+  // открытую, чтобы отказ от пароля не оставил пустой экран.
+  if (data.current_locked) {
+    const locked = data.personas.find((p) => p.id === state.personaId);
+    const open = data.personas.find((p) => !p.locked);
+    if (open) {
+      state.personaId = open.id;
+      await loadPersona();
+      await loadChats();
+    }
+    if (locked) unlockPersona(locked);
+    return;
+  }
+
   await loadPersona();
   await loadChats();
 }
@@ -1098,6 +1113,94 @@ function openSettings() {
   themeBox.appendChild(choice);
   body.appendChild(themeBox);
 
+  // --- пароль и скрытие ---------------------------------------------------
+  const lockBox = settingBlock("Пароль");
+  const lockInput = document.createElement("input");
+  lockInput.type = "password";
+  lockInput.autocomplete = "new-password";
+  lockInput.placeholder = persona.has_password ? "новый пароль" : "пароль";
+  lockBox.appendChild(lockInput);
+
+  const lockError = document.createElement("div");
+  lockError.className = "error hidden";
+
+  const send = async (payload) => {
+    lockError.classList.add("hidden");
+    try {
+      await api(`/api/personas/${persona.id}/password`, {
+        method: "POST",
+        body: JSON.stringify(payload),
+      });
+    } catch (error) {
+      lockError.textContent = error.message;
+      lockError.classList.remove("hidden");
+      return false;
+    }
+    const fresh = await api("/api/bootstrap");
+    state.personas = fresh.personas;
+    await loadPersona();
+    openSettings(); // перерисовываем: набор кнопок зависит от того, есть ли пароль
+    return true;
+  };
+
+  const lockButtons = document.createElement("div");
+  lockButtons.className = "lock-buttons";
+
+  const setPassword = document.createElement("button");
+  setPassword.className = "primary";
+  setPassword.textContent = persona.has_password ? "Сменить" : "Поставить пароль";
+  setPassword.onclick = () => {
+    if (!lockInput.value.trim()) {
+      lockError.textContent = "Пустой пароль не годится";
+      lockError.classList.remove("hidden");
+      return;
+    }
+    send({ password: lockInput.value }).catch(fail);
+  };
+  lockButtons.appendChild(setPassword);
+
+  if (persona.has_password) {
+    const drop = document.createElement("button");
+    drop.textContent = "Снять пароль";
+    drop.onclick = () => {
+      if (!confirm("Снять пароль? Личность перестанет быть скрытой.")) return;
+      send({ password: "" }).catch(fail);
+    };
+    lockButtons.appendChild(drop);
+  }
+  lockBox.append(lockButtons, lockError);
+
+  const hideLabel = document.createElement("label");
+  hideLabel.className = "switch";
+  const hideBox = document.createElement("input");
+  hideBox.type = "checkbox";
+  hideBox.checked = Boolean(persona.hidden);
+  hideBox.disabled = !persona.has_password;
+  hideBox.onchange = () => send({ hidden: hideBox.checked }).catch(fail);
+  const hideText = document.createElement("span");
+  hideText.textContent = "Не показывать в переключателе";
+  hideLabel.append(hideBox, hideText);
+  lockBox.appendChild(hideLabel);
+
+  lockBox.appendChild(
+    note(
+      persona.has_password
+        ? "Скрытая личность не видна нигде, включая статистику за всё время. " +
+            "Войти в неё можно пунктом «Открыть скрытую личность» — по паролю, " +
+            "имя там не спрашивается."
+        : "Пароль закрывает вход в личность в этом интерфейсе. Скрытие " +
+            "доступно только вместе с паролем."
+    )
+  );
+  lockBox.appendChild(
+    note(
+      "Важно и честно: содержимое базы это не шифрует. Тот, кто откроет файл " +
+        "chats.db, прочитает всё и без пароля. Это замок от чужого взгляда " +
+        "и случайного клика, а не сейф."
+    )
+  );
+  body.appendChild(lockBox);
+
   // --- удаление личности --------------------------------------------------
   const zone = document.createElement("div");
   zone.className = "danger-zone";
@@ -1180,6 +1283,119 @@ const CATEGORY = {
   cache_miss: "Вход, мимо кэша",
   output: "Выход",
 };
+
+/* ------------------------------------------------------------- замок */
+
+/**
+ * Окно с одним полем для пароля.
+ * options: {title, hint, submit, onSubmit} — onSubmit возвращает текст
+ * ошибки, если пароль не подошёл, и ничего, если всё хорошо.
+ */
+function askPassword(options) {
+  $("modal-title").textContent = options.title;
+  const body = $("modal-body");
+  body.replaceChildren();
+
+  const box = settingBlock("");
+  const input = document.createElement("input");
+  input.type = "password";
+  input.autocomplete = "off";
+  box.appendChild(input);
+  if (options.hint) box.appendChild(note(options.hint));
+  body.appendChild(box);
+
+  const error = document.createElement("div");
+  error.className = "error hidden";
+  body.appendChild(error);
+
+  const go = document.createElement("button");
+  go.className = "primary";
+  go.style.width = "auto";
+  go.style.padding = "9px 20px";
+  go.textContent = options.submit || "Открыть";
+  go.onclick = async () => {
+    go.disabled = true;
+    error.classList.add("hidden");
+    const message = await options.onSubmit(input.value);
+    go.disabled = false;
+    if (message) {
+      error.textContent = message;
+      error.classList.remove("hidden");
+      input.select();
+      return;
+    }
+    closeModal();
+  };
+  body.appendChild(go);
+
+  input.addEventListener("keydown", (event) => {
+    if (event.key === "Enter") go.click();
+  });
+
+  $("modal").classList.remove("hidden");
+  input.focus();
+}
+
+/** Открыть запертую личность и перейти в неё. */
+function unlockPersona(persona) {
+  askPassword({
+    title: `Личность «${persona.name}»`,
+    hint: "Заперта паролем.",
+    onSubmit: async (password) => {
+      try {
+        await api(`/api/personas/${persona.id}/unlock`, {
+          method: "POST",
+          body: JSON.stringify({ password }),
+        });
+      } catch (error) {
+        return error.message;
+      }
+      await switchPersona(persona.id);
+      return null;
+    },
+  });
+}
+
+/** Вход в скрытую личность: по паролю, без имени. */
+function openHidden() {
+  askPassword({
+    title: "Скрытая личность",
+    hint: "Введи пароль. Имя не спрашиваем: иначе пришлось бы отвечать, есть ли такая.",
+    onSubmit: async (password) => {
+      let result;
+      try {
+        result = await api("/api/unlock-hidden", {
+          method: "POST",
+          body: JSON.stringify({ password }),
+        });
+      } catch (error) {
+        return error.message;
+      }
+      const fresh = await api("/api/bootstrap");
+      state.personas = fresh.personas;
+      await switchPersona(result.persona_id);
+      return null;
+    },
+  });
+}
+
+async function lockPersona() {
+  await api(`/api/personas/${state.personaId}/lock`, { method: "POST" });
+  location.reload(); // проще и честнее: всё открытое с экрана уходит разом
+}
+
+/** Общий переход в личность: и из переключателя, и после пароля. */
+async function switchPersona(personaId) {
+  await api("/api/current-persona", {
+    method: "POST",
+    body: JSON.stringify({ persona_id: personaId }),
+  });
+  state.personaId = personaId;
+  state.chatId = null;
+  resetSearch();
+  await loadPersona();
+  await loadChats();
+}
 
 /* ----------------------------------------------------------- экспорт */
 
@@ -1579,19 +1795,21 @@ function openPersonaMenu() {
   for (const persona of state.personas) {
     const button = document.createElement("button");
     button.textContent = persona.name;
+    if (persona.locked) {
+      const lock = document.createElement("span");
+      lock.className = "lock-mark";
+      lock.textContent = "🔒";
+      button.appendChild(lock);
+    }
     if (persona.id === state.personaId) button.classList.add("current");
     button.onclick = async () => {
       closeMenu();
       if (persona.id === state.personaId) return;
-      await api("/api/current-persona", {
-        method: "POST",
-        body: JSON.stringify({ persona_id: persona.id }),
-      });
-      state.personaId = persona.id;
-      state.chatId = null;
-      resetSearch();
-      await loadPersona();
-      await loadChats();
+      if (persona.locked) {
+        unlockPersona(persona);
+        return;
+      }
+      await switchPersona(persona.id);
     };
     menu.appendChild(button);
   }
@@ -1623,6 +1841,24 @@ function openPersonaMenu() {
     showStats("/api/stats/all");
   };
   menu.appendChild(allStats);
+
+  const hidden = document.createElement("button");
+  hidden.textContent = "Открыть скрытую личность";
+  hidden.onclick = () => {
+    closeMenu();
+    openHidden();
+  };
+  menu.appendChild(hidden);
+
+  if (state.persona && state.persona.has_password) {
+    const lock = document.createElement("button");
+    lock.textContent = "Запереть обратно";
+    lock.onclick = () => {
+      closeMenu();
+      lockPersona().catch(fail);
+    };
+    menu.appendChild(lock);
+  }
 
   const exportAll = document.createElement("button");
   exportAll.textContent = "Экспорт всех чатов";
