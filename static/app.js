@@ -1340,7 +1340,7 @@ function askPassword(options) {
 function unlockPersona(persona) {
   askPassword({
     title: `Личность «${persona.name}»`,
-    hint: "Заперта паролем.",
+    hint: "Заперта паролем. Общий пароль тоже подойдёт — он откроет сразу все.",
     onSubmit: async (password) => {
       try {
         await api(`/api/personas/${persona.id}/unlock`, {
@@ -1350,6 +1350,9 @@ function unlockPersona(persona) {
       } catch (error) {
         return error.message;
       }
+      // Общий пароль открывает сразу все — список замков надо перечитать.
+      const fresh = await api("/api/bootstrap");
+      state.personas = fresh.personas;
       await switchPersona(persona.id);
       return null;
     },
@@ -1360,7 +1363,9 @@ function unlockPersona(persona) {
 function openHidden() {
   askPassword({
     title: "Скрытая личность",
-    hint: "Введи пароль. Имя не спрашиваем: иначе пришлось бы отвечать, есть ли такая.",
+    hint:
+      "Введи пароль личности или общий — общий откроет сразу все. " +
+      "Имя не спрашиваем: иначе пришлось бы отвечать, есть ли такая.",
     onSubmit: async (password) => {
       let result;
       try {
@@ -1373,7 +1378,12 @@ function openHidden() {
       }
       const fresh = await api("/api/bootstrap");
       state.personas = fresh.personas;
-      await switchPersona(result.persona_id);
+      if (result.persona_id) {
+        await switchPersona(result.persona_id);
+      } else {
+        // Общий пароль при отсутствии скрытых: открылись обычные запертые.
+        location.reload();
+      }
       return null;
     },
   });
@@ -1382,6 +1392,97 @@ function openHidden() {
 async function lockPersona() {
   await api(`/api/personas/${state.personaId}/lock`, { method: "POST" });
   location.reload(); // проще и честнее: всё открытое с экрана уходит разом
+}
+
+/** Один пароль на всё устройство: открывает любую запертую личность. */
+async function openMasterDialog() {
+  const current = await api("/api/master");
+  $("modal-title").textContent = "Общий пароль";
+  const body = $("modal-body");
+  body.replaceChildren();
+
+  body.appendChild(
+    note(
+      current.has_master
+        ? "Сейчас он задан. Подходит везде, где спрашивают пароль личности, " +
+            "и открывает все запертые личности разом."
+        : "Один пароль на всё устройство: подходит везде, где спрашивают " +
+            "пароль личности, и открывает все запертые разом. Личные пароли " +
+            "при этом остаются и продолжают работать."
+    )
+  );
+
+  const proofBox = settingBlock("Действующий пароль");
+  const proof = document.createElement("input");
+  proof.type = "password";
+  proof.autocomplete = "off";
+  proofBox.append(
+    proof,
+    note(
+      "Общий или любой личности. Если паролей ещё нет вовсе — оставь пустым. " +
+        "Спрашиваем, чтобы завести общий пароль было не проще, чем открыть " +
+        "личность: иначе он стал бы чёрным ходом."
+    )
+  );
+  body.appendChild(proofBox);
+
+  const newBox = settingBlock("Новый общий пароль");
+  const freshInput = document.createElement("input");
+  freshInput.type = "password";
+  freshInput.autocomplete = "new-password";
+  newBox.appendChild(freshInput);
+  body.appendChild(newBox);
+
+  const error = document.createElement("div");
+  error.className = "error hidden";
+  body.appendChild(error);
+
+  const send = async (password, confirmText) => {
+    if (confirmText && !confirm(confirmText)) return;
+    error.classList.add("hidden");
+    try {
+      await api("/api/master", {
+        method: "POST",
+        body: JSON.stringify({ password, proof: proof.value }),
+      });
+    } catch (failure) {
+      error.textContent = failure.message;
+      error.classList.remove("hidden");
+      return;
+    }
+    closeModal();
+  };
+
+  const buttons = document.createElement("div");
+  buttons.className = "lock-buttons";
+
+  const save = document.createElement("button");
+  save.className = "primary";
+  save.textContent = current.has_master ? "Сменить" : "Задать";
+  save.onclick = () => {
+    if (!freshInput.value.trim()) {
+      error.textContent = "Пустой пароль не годится";
+      error.classList.remove("hidden");
+      return;
+    }
+    send(freshInput.value).catch(fail);
+  };
+  buttons.appendChild(save);
+
+  if (current.has_master) {
+    const drop = document.createElement("button");
+    drop.textContent = "Снять общий";
+    drop.onclick = () =>
+      send(
+        "",
+        "Снять общий пароль? Личные пароли личностей останутся на месте."
+      ).catch(fail);
+    buttons.appendChild(drop);
+  }
+  body.appendChild(buttons);
+
+  $("modal").classList.remove("hidden");
+  proof.focus();
 }
 
 /** Общий переход в личность: и из переключателя, и после пароля. */
@@ -1841,6 +1942,14 @@ function openPersonaMenu() {
     showStats("/api/stats/all");
   };
   menu.appendChild(allStats);
+
+  const master = document.createElement("button");
+  master.textContent = "Общий пароль";
+  master.onclick = () => {
+    closeMenu();
+    openMasterDialog().catch(fail);
+  };
+  menu.appendChild(master);
 
   const hidden = document.createElement("button");
   hidden.textContent = "Открыть скрытую личность";

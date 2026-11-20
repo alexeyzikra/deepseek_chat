@@ -203,6 +203,77 @@ class PasswordSetIn(BaseModel):
 WRONG_PASSWORD_DELAY = 0.5  # не защита, а помеха перебору вслепую
 
 
+MASTER_KEY = "master_password"
+
+
+def _master_hash(conn) -> str | None:
+    return db.get_state(conn, MASTER_KEY) or None
+
+
+def _opens_anything(conn, password: str) -> bool:
+    """Знает ли человек хоть один пароль в этом приложении.
+
+    Нужно, чтобы поставить общий пароль было не проще, чем открыть личность.
+    Иначе он был бы чёрным ходом: пришёл к незапертому компьютеру, завёл
+    общий пароль, им же всё и открыл.
+    """
+    master = _master_hash(conn)
+    if master and passwords.check_password(password, master):
+        return True
+    rows = conn.execute(
+        "SELECT password_hash FROM persona "
+        "WHERE password_hash IS NOT NULL AND deleted_at IS NULL"
+    ).fetchall()
+    return any(passwords.check_password(password, r["password_hash"]) for r in rows)
+
+
+def _anything_locked(conn) -> bool:
+    master = _master_hash(conn)
+    has_persona_password = conn.execute(
+        "SELECT 1 FROM persona WHERE password_hash IS NOT NULL "
+        "AND deleted_at IS NULL LIMIT 1"
+    ).fetchone()
+    return bool(master or has_persona_password)
+
+
+def _unlock_all(conn) -> int:
+    rows = conn.execute(
+        "SELECT id FROM persona WHERE password_hash IS NOT NULL "
+        "AND deleted_at IS NULL"
+    ).fetchall()
+    UNLOCKED.update(r["id"] for r in rows)
+    return len(rows)
+
+
+@app.get("/api/master")
+def master_state():
+    with db.session() as conn:
+        return {"has_master": bool(_master_hash(conn))}
+
+
+class MasterIn(BaseModel):
+    password: str = ""  # пусто — снять общий пароль
+    proof: str = ""     # любой действующий пароль: общий или личности
+
+
+@app.post("/api/master")
+def set_master(body: MasterIn):
+    with db.session() as conn:
+        if _anything_locked(conn) and not _opens_anything(conn, body.proof):
+            time.sleep(WRONG_PASSWORD_DELAY)
+            raise HTTPException(
+                403, "Нужен действующий пароль: общий или любой личности"
+            )
+        password = body.password.strip()
+        if password:
+            db.set_state(conn, MASTER_KEY, passwords.hash_password(password))
+            has_master = True
+        else:
+            db.set_state(conn, MASTER_KEY, "")
+            has_master = False
+    return {"has_master": has_master}
+
+
 @app.post("/api/personas/{persona_id}/unlock")
 def unlock_persona(persona_id: int, body: PasswordIn):
     with db.session() as conn:
@@ -210,11 +281,18 @@ def unlock_persona(persona_id: int, body: PasswordIn):
             "SELECT password_hash FROM persona WHERE id = ? AND deleted_at IS NULL",
             (persona_id,),
         ).fetchone()
-    if not row or not passwords.check_password(body.password, row["password_hash"]):
+        master = _master_hash(conn)
+    own = row and passwords.check_password(body.password, row["password_hash"])
+    if not own and not (master and passwords.check_password(body.password, master)):
         time.sleep(WRONG_PASSWORD_DELAY)
         raise HTTPException(403, "Пароль не подошёл")
-    UNLOCKED.add(persona_id)
-    return {"ok": True}
+    if own:
+        UNLOCKED.add(persona_id)
+        return {"ok": True, "opened": 1}
+    # Общий пароль открывает всё разом — в том числе ту, куда стучались.
+    with db.session() as conn:
+        opened = _unlock_all(conn)
+    return {"ok": True, "opened": opened}
 
 
 @app.post("/api/unlock-hidden")
@@ -233,7 +311,18 @@ def unlock_hidden(body: PasswordIn):
     for row in rows:
         if passwords.check_password(body.password, row["password_hash"]):
             UNLOCKED.add(row["id"])
-            return {"persona_id": row["id"], "name": row["name"]}
+            return {"persona_id": row["id"], "name": row["name"], "opened": 1}
+
+    with db.session() as conn:
+        master = _master_hash(conn)
+        if master and passwords.check_password(body.password, master):
+            opened = _unlock_all(conn)
+            first = rows[0] if rows else None
+            return {
+                "persona_id": first["id"] if first else None,
+                "name": first["name"] if first else None,
+                "opened": opened,
+            }
     time.sleep(WRONG_PASSWORD_DELAY)
     raise HTTPException(403, "Ничего не открылось")
 

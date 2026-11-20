@@ -97,7 +97,7 @@ html, body {
 }
 .setup-card label.checkbox input { margin-top: 4px; }
 
-input[type="text"], textarea {
+input[type="text"], input[type="password"], textarea {
   width: 100%;
   background: var(--bg);
   color: var(--text);
@@ -108,7 +108,7 @@ input[type="text"], textarea {
   font-size: 15px;
   resize: vertical;
 }
-input[type="text"]:focus, textarea:focus {
+input[type="text"]:focus, input[type="password"]:focus, textarea:focus {
   outline: none;
   border-color: var(--accent);
 }
