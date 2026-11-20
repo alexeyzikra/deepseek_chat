@@ -262,7 +262,10 @@ def set_master(body: MasterIn):
         if _anything_locked(conn) and not _opens_anything(conn, body.proof):
             time.sleep(WRONG_PASSWORD_DELAY)
             raise HTTPException(
-                403, "Нужен действующий пароль: общий или любой личности"
+                403,
+                "Этот пароль не подошёл. В поле «действующий» нужен пароль, "
+                "который уже работает: общий или любой личности. Если поле "
+                "заполнил браузер — сотри и впиши вручную.",
             )
         password = body.password.strip()
         if password:

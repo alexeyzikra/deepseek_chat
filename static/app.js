@@ -1115,11 +1115,9 @@ function openSettings() {
 
   // --- пароль и скрытие ---------------------------------------------------
   const lockBox = settingBlock("Пароль");
-  const lockInput = document.createElement("input");
-  lockInput.type = "password";
-  lockInput.autocomplete = "new-password";
-  lockInput.placeholder = persona.has_password ? "новый пароль" : "пароль";
-  lockBox.appendChild(lockInput);
+  const lockField = passwordField(persona.has_password ? "новый пароль" : "пароль");
+  const lockInput = lockField.input;
+  lockBox.appendChild(lockField.wrap);
 
   const lockError = document.createElement("div");
   lockError.className = "error hidden";
@@ -1297,10 +1295,9 @@ function askPassword(options) {
   body.replaceChildren();
 
   const box = settingBlock("");
-  const input = document.createElement("input");
-  input.type = "password";
-  input.autocomplete = "off";
-  box.appendChild(input);
+  const field = passwordField("");
+  const input = field.input;
+  box.appendChild(field.wrap);
   if (options.hint) box.appendChild(note(options.hint));
   body.appendChild(box);
 
@@ -1394,6 +1391,39 @@ async function lockPersona() {
   location.reload(); // проще и честнее: всё открытое с экрана уходит разом
 }
 
+/**
+ * Поле пароля с кнопкой «показать».
+ *
+ * autocomplete="new-password" и случайное имя — чтобы менеджер паролей
+ * браузера не подставил сюда сохранённый пароль от чего-то другого: поле
+ * выглядит заполненным, человек жмёт кнопку и получает отказ, не понимая,
+ * почему. «Показать» на случай, если подставил всё равно: видно сразу.
+ */
+function passwordField(placeholder) {
+  const wrap = document.createElement("div");
+  wrap.className = "password-field";
+
+  const input = document.createElement("input");
+  input.type = "password";
+  input.autocomplete = "new-password";
+  input.name = "p" + Math.random().toString(36).slice(2);
+  if (placeholder) input.placeholder = placeholder;
+
+  const eye = document.createElement("button");
+  eye.type = "button";
+  eye.className = "peek";
+  eye.textContent = "показать";
+  eye.onclick = () => {
+    const hiddenNow = input.type === "password";
+    input.type = hiddenNow ? "text" : "password";
+    eye.textContent = hiddenNow ? "скрыть" : "показать";
+    input.focus();
+  };
+
+  wrap.append(input, eye);
+  return { wrap, input };
+}
+
 /** Один пароль на всё устройство: открывает любую запертую личность. */
 async function openMasterDialog() {
   const current = await api("/api/master");
@@ -1413,11 +1443,10 @@ async function openMasterDialog() {
   );
 
   const proofBox = settingBlock("Действующий пароль");
-  const proof = document.createElement("input");
-  proof.type = "password";
-  proof.autocomplete = "off";
+  const proofField = passwordField("");
+  const proof = proofField.input;
   proofBox.append(
-    proof,
+    proofField.wrap,
     note(
       "Общий или любой личности. Если паролей ещё нет вовсе — оставь пустым. " +
         "Спрашиваем, чтобы завести общий пароль было не проще, чем открыть " +
@@ -1427,10 +1456,9 @@ async function openMasterDialog() {
   body.appendChild(proofBox);
 
   const newBox = settingBlock("Новый общий пароль");
-  const freshInput = document.createElement("input");
-  freshInput.type = "password";
-  freshInput.autocomplete = "new-password";
-  newBox.appendChild(freshInput);
+  const freshField = passwordField("");
+  const freshInput = freshField.input;
+  newBox.appendChild(freshField.wrap);
   body.appendChild(newBox);
 
   const error = document.createElement("div");
