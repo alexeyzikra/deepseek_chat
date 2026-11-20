@@ -1336,26 +1336,29 @@ def stats_persona(persona_id: int):
 @app.get("/api/stats/all")
 def stats_all():
     with db.session() as conn:
-        # Скрытые личности не упоминаются и здесь: строка «кто-то потратил
-        # 500 мц» — это ответ на вопрос, есть ли они. Пока такая личность
-        # заперта, её вызовы выпадают и из разбивки, и из общей суммы.
-        hidden_ids = [
-            r["id"]
-            for r in conn.execute("SELECT id FROM persona WHERE hidden = 1")
-            if r["id"] not in UNLOCKED
+        # Скрытые личности считаются наравне со всеми, но без имени:
+        # «Скрытая личность №1». Деньги потрачены по-настоящему, и сумма,
+        # которая зависит от того, что сейчас открыто, не сумма, а фокус.
+        # Цена честности: по такой строке видно, что скрытые есть.
+        # Нумеруем только те, что сейчас и правда скрыты: иначе в списке
+        # остались бы дыры (№1, №3), а дыра — это тоже сведения.
+        still_hidden = [
+            row["id"]
+            for row in conn.execute(
+                "SELECT id FROM persona WHERE hidden = 1 ORDER BY id"
+            ).fetchall()
+            if row["id"] not in UNLOCKED
         ]
-        skip = ""
-        if hidden_ids:
-            skip = " WHERE persona_id NOT IN (%s)" % ",".join(
-                str(i) for i in hidden_ids
-            )
-        rows = conn.execute(CALL_COLUMNS + skip).fetchall()
+        hidden_names = {
+            persona_id: f"Скрытая личность №{number}"
+            for number, persona_id in enumerate(still_hidden, start=1)
+        }
+        rows = conn.execute(CALL_COLUMNS).fetchall()
         per_persona = conn.execute(
             "SELECT c.persona_id, COALESCE(p.name, 'Удалённая личность') AS name, "
             "COUNT(*) AS calls, SUM(c.cost_usd) AS cost "
             "FROM api_call c LEFT JOIN persona p ON p.id = c.persona_id "
-            + (skip.replace("persona_id", "c.persona_id") if skip else "")
-            + " GROUP BY c.persona_id ORDER BY cost DESC"
+            "GROUP BY c.persona_id ORDER BY cost DESC"
         ).fetchall()
         first = conn.execute(
             "SELECT created_at FROM api_call ORDER BY id LIMIT 1"
@@ -1365,7 +1368,7 @@ def stats_all():
     data["since"] = first["created_at"] if first else None
     data["rows"] = [
         {
-            "label": r["name"],
+            "label": hidden_names.get(r["persona_id"], r["name"]),
             "calls": r["calls"],
             "total": pricing.to_millicents(r["cost"]),
         }
