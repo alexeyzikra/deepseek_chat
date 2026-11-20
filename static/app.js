@@ -1115,7 +1115,10 @@ function openSettings() {
 
   // --- пароль и скрытие ---------------------------------------------------
   const lockBox = settingBlock("Пароль");
-  const lockField = passwordField(persona.has_password ? "новый пароль" : "пароль");
+  const lockField = passwordField(
+    persona.has_password ? "новый пароль" : "пароль",
+    true
+  );
   const lockInput = lockField.input;
   lockBox.appendChild(lockField.wrap);
 
@@ -1399,12 +1402,15 @@ async function lockPersona() {
  * выглядит заполненным, человек жмёт кнопку и получает отказ, не понимая,
  * почему. «Показать» на случай, если подставил всё равно: видно сразу.
  */
-function passwordField(placeholder) {
+function passwordField(placeholder, visible = false) {
   const wrap = document.createElement("div");
   wrap.className = "password-field";
 
   const input = document.createElement("input");
-  input.type = "password";
+  // Новый пароль показываем открытым: пароль, которого никто не видел,
+  // завести нельзя. Браузер успел подставить свой — это сразу заметно.
+  // Поля для ввода уже существующего пароля остаются закрытыми.
+  input.type = visible ? "text" : "password";
   input.autocomplete = "new-password";
   input.name = "p" + Math.random().toString(36).slice(2);
   if (placeholder) input.placeholder = placeholder;
@@ -1412,7 +1418,7 @@ function passwordField(placeholder) {
   const eye = document.createElement("button");
   eye.type = "button";
   eye.className = "peek";
-  eye.textContent = "показать";
+  eye.textContent = visible ? "скрыть" : "показать";
   eye.onclick = () => {
     const hiddenNow = input.type === "password";
     input.type = hiddenNow ? "text" : "password";
@@ -1456,7 +1462,7 @@ async function openMasterDialog() {
   body.appendChild(proofBox);
 
   const newBox = settingBlock("Новый общий пароль");
-  const freshField = passwordField("");
+  const freshField = passwordField("виден, чтобы не завести вслепую", true);
   const freshInput = freshField.input;
   newBox.appendChild(freshField.wrap);
   body.appendChild(newBox);
