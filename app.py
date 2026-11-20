@@ -311,10 +311,22 @@ def unlock_hidden(body: PasswordIn):
             "SELECT id, name, password_hash FROM persona "
             "WHERE hidden = 1 AND deleted_at IS NULL"
         ).fetchall()
-    for row in rows:
-        if passwords.check_password(body.password, row["password_hash"]):
-            UNLOCKED.add(row["id"])
-            return {"persona_id": row["id"], "name": row["name"], "opened": 1}
+    # Открываем ВСЕ скрытые личности с этим паролем, а не первую попавшуюся.
+    # Одинаковые пароли мы разрешаем, и раньше вторая такая личность просто
+    # не открывалась: перебор останавливался на первом совпадении.
+    matched = [
+        row
+        for row in rows
+        if passwords.check_password(body.password, row["password_hash"])
+    ]
+    if matched:
+        UNLOCKED.update(row["id"] for row in matched)
+        first = matched[0]
+        return {
+            "persona_id": first["id"],
+            "name": first["name"],
+            "opened": len(matched),
+        }
 
     with db.session() as conn:
         master = _master_hash(conn)
