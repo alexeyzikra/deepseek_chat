@@ -300,20 +300,21 @@ def unlock_persona(persona_id: int, body: PasswordIn):
 
 @app.post("/api/unlock-hidden")
 def unlock_hidden(body: PasswordIn):
-    """Вход в скрытую личность — по одному паролю, без имени.
+    """Вход по одному паролю, без имени.
 
     Имя спрашивать нельзя: пришлось бы либо показывать список скрытых, либо
     отвечать «такой нет», а это уже ответ на вопрос, есть ли она. Ответ
     здесь один и тот же и когда пароль неверный, и когда скрытых нет вовсе.
+
+    Правило простое: пароль открывает всё, что им заперто — и скрытое, и
+    видимое. Одинаковые пароли мы разрешаем, а здесь дверь не называют,
+    поэтому останавливаться на первом совпадении нельзя.
     """
     with db.session() as conn:
         rows = conn.execute(
-            "SELECT id, name, password_hash FROM persona "
-            "WHERE hidden = 1 AND deleted_at IS NULL"
+            "SELECT id, name, hidden, password_hash FROM persona "
+            "WHERE password_hash IS NOT NULL AND deleted_at IS NULL"
         ).fetchall()
-    # Открываем ВСЕ скрытые личности с этим паролем, а не первую попавшуюся.
-    # Одинаковые пароли мы разрешаем, и раньше вторая такая личность просто
-    # не открывалась: перебор останавливался на первом совпадении.
     matched = [
         row
         for row in rows
@@ -321,7 +322,9 @@ def unlock_hidden(body: PasswordIn):
     ]
     if matched:
         UNLOCKED.update(row["id"] for row in matched)
-        first = matched[0]
+        # Попадаем в скрытую, если она среди открытых: окно затевалось ради
+        # них, а видимую и так видно в переключателе.
+        first = next((row for row in matched if row["hidden"]), matched[0])
         return {
             "persona_id": first["id"],
             "name": first["name"],
@@ -332,7 +335,7 @@ def unlock_hidden(body: PasswordIn):
         master = _master_hash(conn)
         if master and passwords.check_password(body.password, master):
             opened = _unlock_all(conn)
-            first = rows[0] if rows else None
+            first = next((row for row in rows if row["hidden"]), None)
             return {
                 "persona_id": first["id"] if first else None,
                 "name": first["name"] if first else None,
